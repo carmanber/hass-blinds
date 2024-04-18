@@ -120,7 +120,7 @@ This library is configured through the "normal" appdaemon configuration file `ap
 Before being able to configure every window, the engine needs four helper apps. So please don't forget to add those: 
 
 ```yaml
-lind_lib_global:
+blind_lib_global:
   module: blinds_lib
   global: true
 
