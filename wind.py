@@ -29,7 +29,7 @@ class Wind(hass.Hass):
     def unarm_wind_alarm(self, entity=None, attribute=None, old=None, new=None, kwargs=None):
         if self.wind_alarm_timeout < int(time.time()) and self.wind_alarm_bool:
             self.wind_alarm_bool = False
-            self.log("Wind has slow down, wind alarm is now off")
+            self.log("Wind has slowed down, wind alarm is now off")
             self.call_service("input_boolean/turn_off",
                 entity_id=self.args["wind_alarm"])
 
