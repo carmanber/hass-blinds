@@ -209,3 +209,5 @@ This project was written for a single house that's running on KNX. I decided to 
 - add a unit test that passes and proofs the correctness of your code
 - stay compatible with the current API. If the blinds in my house stop working I get nervous. That means you can't change defaults, you can only introduce ways to override them.
 - I love contributions that simplify the code or setup. The code was written at night and over a few years, so I might not always have gone the most simple routes in my logic.
+
+The code was further reviewed and maintained by Carmanber. We would be happy to add your contribution as well!
