@@ -113,7 +113,7 @@ input_number:
 
 ```
 
-### Configuring appdaemon's app.yaml
+### Configuring appdaemon's apps.yaml
 
 This library is configured through the "normal" appdaemon configuration file `apps.yaml`.
 
