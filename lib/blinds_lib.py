@@ -3,8 +3,8 @@ import time
 import datetime
 import math
 import yaml
-from sun_lib import Sun
-from hysteresis_lib import Hysteresis
+from lib.sun_lib import Sun
+from lib.hysteresis_lib import Hysteresis
 
 def lower_function(x, lux, old_x):
   if lux < 8000:
@@ -240,11 +240,15 @@ class Blind:
     # last position is None -> copy knx current position if kill switch is not set.
     # knx position and last position differ -> kill switch, do nothing until dusk.
     kill_switch_status = self.GetKillSwitch()
+
     if kill_switch_status == self.KILL_SWITCH_ON:
-      self.desired_position_reason = 'Kill Switch is on, release at %s' % datetime.datetime.utcfromtimestamp(self.kill_switch_timeout).strftime('%Y-%m-%d %H:%M:%S')
+      reason = 'Kill Switch is on, release at %s' % datetime.datetime.utcfromtimestamp(self.kill_switch_timeout).strftime('%Y-%m-%d %H:%M:%S')
+      self.desired_position_reason = reason
       return self.NO_CHANGE
 
-    self.Control()
+    reason = self.Control()
+    self.desired_position_reason = reason
+    self.log(f"[Evaluate] Raison: {reason}")
 
     if kill_switch_status == self.KILL_SWITCH_OFF_CHANGE_NEEDED:
       #self.Control()
@@ -335,17 +339,20 @@ class Blind:
     # x = 100/90 = 1.11
     # /10 * 10 um 10er Schritte zu erreichen.
     #angle = int(round((1.111111 * self.elevation) / 10) * 10)
+    # 0 fermé angle du soleil c est 0
 
     # Default to closed.
     angle = self.DOWN
-    if 0 < self.elevation < 23:
-      angle = 50
-    elif 23 <= self.elevation < 33:
-      angle = 70
-    elif 33 <= self.elevation < 43:
-      angle = 80
-    elif self.elevation >= 43:
-      angle = 100
+    # Test formule on enleve 5° pour aller de 10° en 10° et etre au milieu
+    angle = int(round((10.0/9.0 * self.elevation) / 10) * 10) 
+    # if 0 < self.elevation < 23:
+    #   angle = 50
+    # elif 23 <= self.elevation < 33:
+    #   angle = 70
+    # elif 33 <= self.elevation < 43:
+    #   angle = 80
+    # elif self.elevation >= 43:
+    #   angle = 100
     return angle
 
   def ManualDayControl(self):
@@ -356,13 +363,31 @@ class Blind:
           day = datetime.datetime.strptime(self.manual_day_control, "%H:%M").time() > datetime.datetime.now().time()
         except ValueError:
           self.log("The manual day control time is not in the correct format and will default to 12:00, please use the format HH:MM", level="WARNING")
-          day = datetime.datetime.now().hour > 12
+          day = datetime.datetime.now().hour < 12
       elif isinstance(self.manual_day_control, bool):
-        day = datetime.datetime.now().hour > 12
+        day = datetime.datetime.now().hour < 12
       else:
         self.log("The manual day control time is not in the correct format and will default to 12:00, please use the format HH:MM", level="WARNING")
-        day = datetime.datetime.now().hour > 12
+        day = datetime.datetime.now().hour < 12
     return day
+
+
+  def ManualNightControl(self):
+    night = False
+    if self.manual_night_control:
+      if isinstance(self.manual_night_control, str):
+        try:
+          night = datetime.datetime.strptime(self.manual_night_control, "%H:%M").time() < datetime.datetime.now().time()
+        except ValueError:
+          self.log("The manual day control time is not in the correct format and will default to 22:00, please use the format HH:MM", level="WARNING")
+          night = datetime.datetime.now().hour > 22
+      elif isinstance(self.manual_night_control, bool):
+        night = datetime.datetime.now().hour > 22
+      else:
+        self.log("The manual day control time is not in the correct format and will default to 22:00, please use the format HH:MM", level="WARNING")
+        night = datetime.datetime.now().hour > 22
+    return night
+
 
   def SunHitsWindow(self):
     if self.azimuth_entry < self.azimuth_exit:
@@ -417,39 +442,80 @@ class Blind:
     #if self.GetKillSwitch():
       #return self.DoNothing('Raffstore Kill Switch is on')
 
-    if self.ManualDayControl():
+    if self.ManualDayControl() or self.ManualNightControl():
       return self.DoNothing('Blinds are controlled manually')
     else:
       return self.SetDesiredPositions(self.UP, self.UP, message)
 
   def Control(self):
-    if self.wind_lock == True:
-      return self.SetDesiredPositions(self.UP, self.UP, 'Wind Alarm blinds go up to prevent damage')
+    if self.wind_lock:
+      reason = 'Wind Alarm: blinds go up to prevent damage'
+      self.SetDesiredPositions(self.UP, self.UP, reason)
+      return reason
+    
+    # this avoids the case where the blinds go up again when the light was already turned on but it gets a little bit brigher (if a cloud vanishes). This is a poor-mans hysteresis implementation.
     if self.Darkness():
-      # this avoids the case where the blinds go up again when the light was already turned on but it gets a little bit brigher (if a cloud vanishes). This is a poor-mans hysteresis implementation.
       if self.lux_dark == Sun.LUX_DARK_WITH_LIGHT_INSIDE:
         self.lux_dark += 200
-      return self.DownBecauseOfDarkness()
+      reason = 'Down because of darkness'
+      self.DownBecauseOfDarkness()
+      return reason
+    
+    if self.ManualNightControl():
+      reason = 'Manual night control active'
+      self.Down(self.DOWN, self.DOWN, reason)
+      return reason
 
     if self.Dawn():
       if datetime.datetime.now().hour > 15:
-        return self.Up('It dawns in the evening, blinds go up')
+        reason = 'It dawns in the evening, blinds go up'
+        self.Up(reason)
       else:
-        return self.DoNothing('Not enough sun, doing nothing')
+        reason = 'Not enough sun, doing nothing'
+        self.DoNothing(reason)
+      return reason
 
     if not self.SunHitsWindow():
+      # Extreme heat control
       if self.DayLight():
-        return self.Up('Sun has not reached the blind yet')
+        if (
+            self.inside_temperature > 26.5 and
+            self.outside_temperature > 30 and
+            self.lux_last_10_minutes > 3000
+          ):
+          reason = 'Extreme heat, all blinds close'
+          self.Down(self.DOWN, self.DOWN, reason)
+          return reason
+        reason = 'Sun has not reached the blind yet'
+        self.Up(reason)
+        return reason
+      
     # Sun hits the window!
     else:
+      # Morning sun is intense and the temperature is hot
       if not self.IntenseSun():
-        return self.Up('Blinds go up, there is not enough sun') # (%s lux, %s elevation, %s azimuth)' % (self.lux_last_10_minutes, self.elevation, self.azimuth))
-
+        if 5 <= self.azimuth < 40:
+            if self.temperature_hysteresis.status_update(self.inside_temperature):
+                reason = 'Low sun but hot morning, blinds go down'
+                self.DownBecauseOfSun()
+                return reason
+            else:
+                reason = 'Morning sun not strong enough'
+                self.Up(reason)
+                return reason
+            
       # intense sun right into the window.
-      else:
+      if self.IntenseSun():
         if self.temperature_hysteresis.status_update(self.inside_temperature):
-          return self.DownBecauseOfSun()
+            reason = 'Intense sun + inside temp high -> blinds go down'
+            self.DownBecauseOfSun()
+            return reason
         else:
-          return self.DoNothing('Doing nothing because max_inside_temperature_cold_day is not reached.')
+            reason = 'Intense sun but inside temp OK -> do nothing'
+            self.DoNothing(reason)
+            return reason
+      
 
-    return self.SetDesiredPositions(False, False, 'Unclear what to do')
+    reason = 'Unclear what to do'
+    self.SetDesiredPositions(False, False, reason)
+    return reason

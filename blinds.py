@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 import appdaemon.plugins.hass.hassapi as hass
 import datetime
-import blinds_lib
+from lib import blinds_lib
 import time
-from sun_lib import Sun
+from lib.sun_lib import Sun
 
 class Blinds(hass.Hass, Sun):
 
@@ -62,6 +62,18 @@ class Blinds(hass.Hass, Sun):
       if int(pos) == 0:
         self.b.SetKillSwitch(30)
 
+  def evaluate_runtime(self):
+    tilt_delay = 85
+    if "blind_runtime" in self.args:
+      try:
+        tilt_delay = float(self.get_state(self.args["wind_speed_sensor"]))
+        return tilt_delay
+      except:  
+        self.log("Invalid blind_runtime argument, the value will be ignored")
+        return tilt_delay
+    return tilt_delay
+      
+      
   def evaluate(self):
     """Check if we need to do something with the blinds. """
     knx_current_position = self.get_state(self.args["blind"], attribute="current_position")
@@ -103,7 +115,7 @@ class Blinds(hass.Hass, Sun):
         return
       # if we know how long the cover runs and they go down, then set the parameters so that the blinds can stop and set the angle faster.
       if "blind_runtime" in self.args and position == self.b.DOWN:
-        self.run_in(self.set_tilt, self.args["blind_runtime"], tilt_position=tilt_position,
+        self.run_in(self.set_tilt, self.evaluate_runtime(), tilt_position=tilt_position,
                     position=position, knx_current_angle=knx_current_angle, stop=True)
       else:
         self.run_in(self.set_tilt, tilt_delay, tilt_position=tilt_position,

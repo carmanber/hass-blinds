@@ -10,21 +10,32 @@ class MaxTemp(hass.Hass):
     time = datetime.time(0, 0, 0)
     self.run_daily(self.reset, time)
 
-  def temperature_update(self, _m, _n, _o, new, cb_args):
-    if new == None:
-      return
+  def safe_float(self, val):
+      try:
+          return float(val)
+      except (TypeError, ValueError):
+          return None
 
-    max_temp_so_far = float(self.get_state(self.args["max_temp_sensor"]))
-    min_temp_so_far = float(self.get_state(self.args["min_temp_sensor"]))
+  def temperature_update(self, entity, attribute, old, new, kwargs):
+      new_temp = self.safe_float(new)
+      if new_temp is None:
+          return
 
-    if float(new) > max_temp_so_far:
-      self.call_service("input_number/set_value",
-          entity_id=self.args["max_temp_sensor"], value=new)
+      max_temp = self.safe_float(self.get_state(self.args["max_temp_sensor"]))
+      min_temp = self.safe_float(self.get_state(self.args["min_temp_sensor"]))
 
-    if float(new) < min_temp_so_far:
-      self.call_service("input_number/set_value",
-          entity_id=self.args["min_temp_sensor"], value=new)
-      # self.log("New daily record for maximum temperatur. Was: %s, new temp is: %s" %  (max_temp_so_far, new))
+      if max_temp is None or min_temp is None:
+          self.log("Stored max/min temperature is unavailable.", level="WARNING")
+          return
+
+      if new_temp > max_temp:
+          self.call_service("input_number/set_value", entity_id=self.args["max_temp_sensor"], value=new_temp)
+          self.log(f"New daily max temperature: {new_temp:.1f}°C")
+
+      if new_temp < min_temp:
+          self.call_service("input_number/set_value", entity_id=self.args["min_temp_sensor"], value=new_temp)
+          self.log(f"New daily min temperature: {new_temp:.1f}°C")
+
 
   def reset(self, _unused):
     # reset this and store the old value somewhere

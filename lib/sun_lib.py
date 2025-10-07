@@ -22,8 +22,8 @@ class LuxEntry:
 class Sun:
   LUX_DARK = 30 # Lux when we consider things to be dark.
   LUX_DARK_WITH_LIGHT_INSIDE = 140 # Lux when we think it's dark outside because we turned the light on.
-  LUX_BLIND_DOWN_THRESHOLD = 60000 # Lux when blinds should go down.
-  LUX_BLIND_UP_THRESHOLD = 20000 # Lux when hysteresis decides to go up again.
+  LUX_BLIND_DOWN_THRESHOLD = 30000 # Lux when blinds should go down.
+  LUX_BLIND_UP_THRESHOLD = 10000 # Lux when hysteresis decides to go up again.
   LUX_BLIND_UP_THRESHOLD_EVENING = 20000 # Lux when the evening has started and there is no point in having the blinds down anymore.
   LUX_DAYLIGHT = 110 # Lux when I think the day has started.
   MINUTES_AVERAGE = 7 # The time it takes to calculate the average of the current sun.
