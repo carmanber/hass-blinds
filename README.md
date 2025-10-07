@@ -120,18 +120,6 @@ This library is configured through the "normal" appdaemon configuration file `ap
 Before being able to configure every window, the engine needs four helper apps. So please don't forget to add those: 
 
 ```yaml
-lind_lib_global:
-  module: blinds_lib
-  global: true
-
-hysteresis_lib_global:
-  module: hysteresis_lib
-  global: true
-
-sun_lib_global:
-  module: sun_lib
-  global: true
-
 sun:
   class: Sun
   module: sun
