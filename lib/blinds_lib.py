@@ -548,9 +548,16 @@ class Blind:
         self.DownBecauseOfSun()
         return reason
       else:
-        reason = 'Intense sun but inside temp OK -> do nothing'
-        self.DoNothing(reason)
-        return reason
+        # S'il fait jour et que la luminosité est élevée mais la température est OK,
+        # on doit vérifier si les stores sont encore fermés depuis la nuit.
+        if self.knx_current_position == self.DOWN and self.DayLight() and not self.Darkness():
+          reason = 'Morning sun, inside temp OK -> blinds go up'
+          self.Up(reason)
+          return reason
+        else:
+          reason = 'Intense sun but inside temp OK -> keep current position'
+          self.DoNothing(reason)
+          return reason
 
   def _extreme_heat_test(self):
     if (self.inside_temperature > 26.5 and

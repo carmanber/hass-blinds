@@ -88,10 +88,10 @@ class Blinds(hass.Hass, Sun):
       
   def evaluate(self):
     """Check if we need to do something with the blinds. """
-    pos = self.get_state(self.args["blind"], attribute="current_position")
+    pos = self.get_valid_knx_position()
     if pos is None:
-      self.set_state_reason("Unknown real-life knx position. Doing nothing.")
-      return
+        self.set_state_reason("Unknown real-life knx position. Waiting for KNX feedback.")
+        return
 
     if 'blind_tilt_position' not in self.args:
       tilt = self.get_state(self.args["blind"], attribute="current_tilt_position")
@@ -249,3 +249,59 @@ class Blinds(hass.Hass, Sun):
 
     self.log("Cannot read inside temperature", level="ERROR")
     return "unknown"
+  
+  def get_valid_knx_position(self):
+    """
+    Safely retrieves the current KNX position for the blind.
+    Handles unknown or missing states gracefully without blocking AppDaemon.
+    Returns:
+        int: Current position (0–100)
+        None: If no valid position available yet
+    """
+    pos = self.get_state(self.args["blind"], attribute="current_position")
+
+    # Si position inconnue ou non initialisée
+    if pos in [None, "unknown"]:
+        # Première occurrence : initialisation du timer de tolérance
+        if not hasattr(self, "knx_first_unknown_ts"):
+            self.knx_first_unknown_ts = self.datetime()
+            self.knx_last_valid_pos = None
+            self.log("KNX position unknown (startup or bus delay). Will retry in 30s.")
+            self.run_in(self.retry_knx_sync, 30)
+            return None
+
+        # Vérifie depuis combien de temps le feedback manque
+        delay = (self.datetime() - self.knx_first_unknown_ts).total_seconds()
+
+        if delay < 300:  # 5 minutes de tolérance
+            self.log(f"KNX position still unknown after {int(delay)}s, retrying later.")
+            self.run_in(self.retry_knx_sync, 30)
+            return None
+
+        # Feedback toujours absent après 5 min → fallback
+        self.log("KNX feedback missing >5 min, using last known position or fallback=50.")
+        return self.knx_last_valid_pos if hasattr(self, "knx_last_valid_pos") and self.knx_last_valid_pos is not None else 50
+
+    # Position connue → met à jour la mémoire
+    try:
+        self.knx_last_valid_pos = int(pos)
+        # Reset du timer d'erreur
+        if hasattr(self, "knx_first_unknown_ts"):
+            del self.knx_first_unknown_ts
+        return self.knx_last_valid_pos
+    except Exception as e:
+        self.log(f"Error parsing KNX position ({pos}): {e}")
+        return self.knx_last_valid_pos if hasattr(self, "knx_last_valid_pos") else 50
+
+  def retry_knx_sync(self, kwargs):
+    pos = self.get_state(self.args["blind"], attribute="current_position")
+    if pos not in [None, "unknown"]:
+        try:
+            self.knx_last_valid_pos = int(pos)
+        except Exception:
+            self.knx_last_valid_pos = 50
+        self.log(f"KNX position restored: {pos}")
+        # relance l’évaluation complète
+        self.evaluate()
+    else:
+        self.log("KNX still unknown after retry. Keeping current state.")
