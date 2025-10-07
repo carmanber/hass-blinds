@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import time
+import statistics
 
 class LuxEntry:
     """Represents a single lux reading with timestamp."""
@@ -21,17 +22,18 @@ class LuxEntry:
 class Sun:
     """Handles the smoothing and logic thresholds for sunlight detection."""
 
-    # ---- Thresholds (tune as needed) ----
-    LUX_DARK = 100                      # Below this, considered night
-    LUX_DARK_WITH_LIGHT_INSIDE = 250    # Dark outside, but lights on inside
+    # ---- Thresholds ----
+    LUX_DARK = 100                      # Below this → night
+    LUX_DARK_WITH_LIGHT_INSIDE = 250    # Night if lights are on
     LUX_BLIND_DOWN_THRESHOLD = 30000    # Sun too strong → blinds down
     LUX_BLIND_UP_THRESHOLD = 10000      # Sun weak enough → blinds up
-    LUX_BLIND_UP_THRESHOLD_EVENING = 20000  # Evening fade threshold
+    LUX_BLIND_UP_THRESHOLD_EVENING = 20000
     LUX_DAYLIGHT = 500                  # Daytime threshold
     MINUTES_AVERAGE = 15                # Rolling window for smoothing
 
     def __init__(self):
         self.lux_values = []
+        self.last_valid_average = None  # new: keep last stable lux
 
     # --- Validation helpers ---
     def is_not_a_number(self, value):
@@ -44,17 +46,14 @@ class Sun:
         Returns [instant_lux, averaged_lux].
         """
 
-        # Validate inputs
         if self.is_not_a_number(day_light) or self.is_not_a_number(dawn_light):
-            return [None, None]
+            # If both sensors are unavailable, keep last valid average
+            return [None, self.last_valid_average]
 
         light = float(day_light)
         dusk = float(dawn_light)
 
-        # Combine both sources:
-        #   - 'light' (direct sunlight)
-        #   - 'dusk' (ambient or diffuse light)
-        # We prefer the maximum, as both measure lux already.
+        # Combine direct + diffuse sunlight (both in lux)
         lux = max(light, dusk)
 
         # Add to buffer and prune old entries
@@ -65,7 +64,16 @@ class Sun:
         if not self.lux_values:
             return [lux, lux]
 
-        lux_sum = sum(l.get_value() for l in self.lux_values)
-        lux_avg = lux_sum / len(self.lux_values)
+        values = [l.get_value() for l in self.lux_values]
+        avg = statistics.mean(values)
 
-        return [lux, lux_avg]
+        # Optional: reject isolated spikes (protects hysteresis)
+        if len(values) > 4:
+            median_val = statistics.median(values)
+            if abs(avg - median_val) / (median_val + 1) > 0.4:
+                avg = median_val
+
+        # Store for stability recovery
+        self.last_valid_average = avg
+
+        return [lux, avg]
