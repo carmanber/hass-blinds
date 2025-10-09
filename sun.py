@@ -15,7 +15,7 @@ class Sun(hass.Hass, SunLib):
 
     def initialize(self):
         self.log("Initializing Sun data collector...")
-
+        SunLib.__init__(self)
         # Sélection dynamique des capteurs selon la config utilisateur
         self.sensor_conf = None
         self._setup_sensors()

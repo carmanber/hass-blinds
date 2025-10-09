@@ -76,4 +76,12 @@ class Sun:
         # Store for stability recovery
         self.last_valid_average = avg
 
+        # --- NIGHT FALL PROTECTION ---
+        # If both sensors read near-zero, clear old values and reset average
+        if lux < self.LUX_DARK/2:  # almost dark
+            # purge all old lux values to avoid holding high averages overnight
+            self.lux_values = [LuxEntry(lux)]
+            lux_avg = lux
+            self.last_valid_average = lux
+
         return [lux, avg]
