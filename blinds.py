@@ -21,22 +21,18 @@ class Blinds(hass.Hass):
         """Main AppDaemon entrypoint for blinds control."""
         self.log("Initializing blinds...")
         #. Get max_temp
-        self.check_max_temp_ready()
+        self.max_temp_app = self.get_app("max_temp")
+        self.sun_app = self.get_app("sun")
 
-    def check_max_temp_ready(self):
-      try:
-          max_temp = self.get_app("max_temp")
-          # ensure the app actually has the attribute
-          if hasattr(max_temp, "outside_temp"):
-              self.log("MaxTemp ready, proceeding with blinds setup.")
-              self.max_temp_app = max_temp
-              self.setup_blinds()
-          else:
-              raise AttributeError
-      except Exception:
-          self.log("MaxTemp not ready yet, retrying in 3s...")
-          self.run_in(lambda _: self.check_max_temp_ready(), 3)
+        while not (self.max_temp_app.ready() and self.sun_app.ready()):
+            self.log(
+                f"Waiting for initialization... "
+                f"max_temp: {self.max_temp_app.ready()} | sun: {self.sun_app.ready()}",
+                level="DEBUG"
+            )
+            time.sleep(0.5)
 
+        self.setup_blinds()
 
     def setup_blinds(self):
         # Instantiate the logic class using config provided in apps.yaml
@@ -93,7 +89,24 @@ class Blinds(hass.Hass):
     def tick(self, kwargs):
         """Main periodic tick every minute."""
         try:
+            # Initiallise variable at every tick
             self.outside_temp = self.max_temp_app.get_outside_temperature()
+            self.b.SetLux(self.sun_app.get_lux_last_10_minutes())
+            self.b.SetAzimuth(float(self.get_state("sun.sun", attribute="azimuth")))
+            self.b.SetElevation(float(self.get_state("sun.sun", attribute="elevation")))
+
+            inside_temp = 'unknown'
+            if 'inside_temperature_is_no_thermostat' in self.args and self.args['inside_temperature_is_no_thermostat']:
+                inside_temp = self.get_state(self.args["inside_temperature"])
+            else:
+                inside_temp = self.get_state(self.args["inside_temperature"], attribute="current_temperature")
+            if self.is_not_a_number(inside_temp):
+                self.set_state_reason('unknown inside temperature. doing nothing.')
+                return
+        
+            self.b.SetInsideTemperature(float(inside_temp))
+
+            # Evaluate 
             self.b.Evaluate()
         except Exception as e:
             self.log(f"Error in tick(): {e}", level="ERROR")
@@ -334,9 +347,6 @@ class Blind:
 
     return msg
 
-  def SetLux(self, average_value):
-    self.lux_last_10_minutes = average_value
-
   def SetWindLock(self, wind_lock):
     self.wind_lock = wind_lock
 
@@ -357,6 +367,9 @@ class Blind:
 
   def SetLuxDark(self, threshold):
     self.lux_dark = threshold
+
+  def SetLux(self, average_value):
+    self.lux_last_10_minutes = average_value
 
   def SetMasterLock(self):
     self.master_lock = True

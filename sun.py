@@ -2,6 +2,7 @@
 import appdaemon.plugins.hass.hassapi as hass
 from lib.sun_lib import Sun as SunLib
 import datetime
+import time
 
 class Sun(hass.Hass, SunLib):
     """
@@ -14,17 +15,33 @@ class Sun(hass.Hass, SunLib):
     RADIATION_LUX_CONV_RATE = 126
 
     def initialize(self):
+        self.is_ready = False
         self.log("Initializing Sun data collector...")
         SunLib.__init__(self)
         # Sélection dynamique des capteurs selon la config utilisateur
         self.sensor_conf = None
         self._setup_sensors()
 
-        # Run every minute (à la 30e seconde)
-        self.run_minutely(self.lux, datetime.time(0, 0, 30))
-
         self.last_sent_value = None  # pour éviter les logs inutiles
         self.last_valid_lux = 0.0    # fallback si un capteur tombe
+
+        # Run every minute on the 30s 
+        self.run_minutely(self.lux, datetime.time(0, 0, 30))
+
+        # Optional: kick an immediate first compute so you don't wait for :30
+        self.run_in(self.lux, 1)
+
+        # Start a non-blocking readiness probe
+        self.run_in(self._await_first_value, 1)
+
+    def _await_first_value(self, kwargs):
+        """Poll until first valid value arrives; never blocks initialize()."""
+        if self.last_sent_value is not None:
+            self.is_ready = True
+            self.log(f"Sun ready")
+            return
+        # try again in 1 second
+        self.run_in(self._await_first_value, 1)
 
     def _setup_sensors(self):
         """Détecte automatiquement la configuration des capteurs."""
@@ -146,3 +163,6 @@ class Sun(hass.Hass, SunLib):
     def get_lux_last_10_minutes(self):
         # return your computed rolling average; if you already track it, just return it
         return self.last_sent_value
+    
+    def ready(self):
+        return self.is_ready

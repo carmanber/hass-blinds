@@ -5,6 +5,7 @@ import datetime
 class MaxTemp(hass.Hass):
 
     def initialize(self):
+        self.is_ready = False
         self.outside_temp = None  # initialize cache
         self.log("Initializing Maximum Temperature system...")
         
@@ -13,6 +14,7 @@ class MaxTemp(hass.Hass):
         self.listen_state(self.temperature_update, entity_id=self.args["outside_temp_sensor"])
         time = datetime.time(0, 0, 0)
         self.run_daily(self.reset, time)
+        self.is_ready = True
 
     def safe_float(self, val):
         try:
@@ -108,3 +110,6 @@ class MaxTemp(hass.Hass):
         if self.outside_temp is None:
             self.log("Outside temperature not initialized yet or captor incorrectly set", level="WARNING")
         return self.outside_temp
+    
+    def ready(self):
+        return self.is_ready
