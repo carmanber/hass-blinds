@@ -2,6 +2,8 @@
 import datetime
 import time
 import appdaemon.plugins.hass.hassapi as hass
+import max_temp
+import sun
 
 from lib.blinds_lib import Blind, EVENING_HOUR_THRESHOLD, DEFAULT_EVENT_KILL_SWITCH_DURATION
 
@@ -17,18 +19,16 @@ class Blinds(hass.Hass):
         self.sun_app = self.get_app("sun")
 
         # Wait for dependencies to report ready() (kept from New version)
-        try:
-            while not (self.max_temp_app and self.max_temp_app.ready() and
-                       self.sun_app and self.sun_app.ready()):
-                self.log(
-                    f"Waiting for initialization... "
-                    f"max_temp: {getattr(self.max_temp_app,'ready',lambda:False)()} | "
-                    f"sun: {getattr(self.sun_app,'ready',lambda:False)()}",
-                    level="DEBUG"
-                )
-                time.sleep(0.5)
-        except Exception as e:
-            self.log(f"Dependency wait loop raised: {e}. Continuing initialization.", level="WARNING")
+        for _trials in range(60):  # wait up to 30 seconds
+            max_ready = getattr(self.max_temp_app, "ready", lambda: False)()
+            sun_ready = getattr(self.sun_app, "ready", lambda: False)()
+            if max_ready and sun_ready:
+                break
+            self.log(f"Waiting for dependencies... max_temp={max_ready}, sun={sun_ready}", level="DEBUG")
+            time.sleep(0.5)
+
+        if _trials + 1 == 60:
+            self.log(f"Dependency wait loop raised. Continuing initialization.", level="WARNING")
 
         # Instantiate logic core (kept across versions)
         self.b = Blind(**self.args["blind_config"])

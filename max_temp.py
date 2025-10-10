@@ -112,4 +112,4 @@ class MaxTemp(hass.Hass):
         return self.outside_temp
     
     def ready(self):
-        return self.is_ready
+        return getattr(self, "is_ready", False)

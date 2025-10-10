@@ -165,4 +165,4 @@ class Sun(hass.Hass, SunLib):
         return self.last_sent_value
     
     def ready(self):
-        return self.is_ready
+        return getattr(self, "is_ready", False)
