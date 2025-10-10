@@ -1,65 +1,64 @@
-# -*- coding: utf-8
-import time
+# -*- coding: utf-8 -*-
 import datetime
-import math
-import yaml
-from lib.sun_lib import Sun
-from lib.hysteresis_lib import Hysteresis
+import time
 import appdaemon.plugins.hass.hassapi as hass
 
-EVENING_HOUR_THRESHOLD = 15
-DEFAULT_EVENT_KILL_SWITCH_DURATION = 30
-
-# -------------------------------------------------------------------
-# NOTE: on n'utilise plus les fonctions globales lower/upper.
-# On crée des versions liées à l'instance pour accéder aux seuils
-# adaptatifs (self.lux_blind_down_threshold / _up_threshold).
-# -------------------------------------------------------------------
+from lib.blinds_lib import Blind, EVENING_HOUR_THRESHOLD, DEFAULT_EVENT_KILL_SWITCH_DURATION
 
 class Blinds(hass.Hass):
+    DEFAULT_TILT_DELAY = 85
+
     def initialize(self):
         """Main AppDaemon entrypoint for blinds control."""
         self.log("Initializing blinds...")
-        #. Get max_temp
+
+        # External app instances (kept from New version)
         self.max_temp_app = self.get_app("max_temp")
         self.sun_app = self.get_app("sun")
 
-        while not (self.max_temp_app.ready() and self.sun_app.ready()):
-            self.log(
-                f"Waiting for initialization... "
-                f"max_temp: {self.max_temp_app.ready()} | sun: {self.sun_app.ready()}",
-                level="DEBUG"
-            )
-            time.sleep(0.5)
+        # Wait for dependencies to report ready() (kept from New version)
+        try:
+            while not (self.max_temp_app and self.max_temp_app.ready() and
+                       self.sun_app and self.sun_app.ready()):
+                self.log(
+                    f"Waiting for initialization... "
+                    f"max_temp: {getattr(self.max_temp_app,'ready',lambda:False)()} | "
+                    f"sun: {getattr(self.sun_app,'ready',lambda:False)()}",
+                    level="DEBUG"
+                )
+                time.sleep(0.5)
+        except Exception as e:
+            self.log(f"Dependency wait loop raised: {e}. Continuing initialization.", level="WARNING")
 
-        self.setup_blinds()
-
-    def setup_blinds(self):
-        # Instantiate the logic class using config provided in apps.yaml
+        # Instantiate logic core (kept across versions)
         self.b = Blind(**self.args["blind_config"])
 
-        # Run an immediate evaluation
+        # First evaluation immediately
         self.tick(None)
 
-        # Schedule periodic tick every 60 seconds
-        ticker = datetime.datetime.now() + datetime.timedelta(seconds=60)
-        self.run_every(self.tick, ticker, 60)
+        # Periodic evaluation every 60s
+        next_tick = datetime.datetime.now() + datetime.timedelta(seconds=60)
+        self.run_every(self.tick, next_tick, 60)
 
-        # Schedule max outside temperature reset every night at 01:01:03
-        time = datetime.time(1, 1, 3)
-        self.run_daily(self.set_max_outside_temp, time)
+        # Nightly reset for max/min outside temp (kept across versions)
+        self.run_daily(self.set_max_outside_temp, datetime.time(1, 1, 3))
 
-        # Ensure default entity for yesterday’s min temp exists
+        # Ensure default sensor for yesterday's min temp (kept)
         if "min_temp_sensor_value_yesterday" not in self.args:
-            self.args[
-                "min_temp_sensor_value_yesterday"
-            ] = "input_number.yesterdays_min_outside_temp_over_24_hours"
+            self.args["min_temp_sensor_value_yesterday"] = (
+                "input_number.yesterdays_min_outside_temp_over_24_hours"
+            )
 
-        # Initialize max outside temperature
+        # Initialize max/min outside temp now
         self.set_max_outside_temp(None)
 
-        # Optional sensors & listeners
+        # Optional sensors & listeners (merged behavior)
         if "contact" in self.args:
+            # Keep door type setup from Previous
+            try:
+                self.b.SetDoorType()
+            except Exception:
+                pass
             self.listen_state(
                 self.window_closed,
                 entity_id=self.args["contact"],
@@ -67,6 +66,7 @@ class Blinds(hass.Hass):
                 old="on",
             )
 
+        # Prefer explicit wind_alarm in args; fall back to app_config if needed inside tick()
         if "wind_alarm" in self.args:
             self.listen_state(
                 self.wind_alarm_off,
@@ -77,622 +77,347 @@ class Blinds(hass.Hass):
 
         if "dawn_lights" in self.args:
             for light in self.args["dawn_lights"]:
-                self.listen_state(
-                    self.light_on, entity_id=light, new="on", old="off"
-                )
-                self.listen_state(
-                    self.light_off, entity_id=light, new="off", old="on"
-                )
+                self.listen_state(self.light_on, entity_id=light, new="on", old="off")
+                self.listen_state(self.light_off, entity_id=light, new="off", old="on")
 
-
-    # ===== Scheduled / state callback handlers =====
-    def tick(self, kwargs):
-        """Main periodic tick every minute."""
-        try:
-            # Initiallise variable at every tick
-            self.outside_temp = self.max_temp_app.get_outside_temperature()
-            self.b.SetLux(self.sun_app.get_lux_last_10_minutes())
-            self.b.SetAzimuth(float(self.get_state("sun.sun", attribute="azimuth")))
-            self.b.SetElevation(float(self.get_state("sun.sun", attribute="elevation")))
-
-            inside_temp = 'unknown'
-            if 'inside_temperature_is_no_thermostat' in self.args and self.args['inside_temperature_is_no_thermostat']:
-                inside_temp = self.get_state(self.args["inside_temperature"])
-            else:
-                inside_temp = self.get_state(self.args["inside_temperature"], attribute="current_temperature")
-            if self.is_not_a_number(inside_temp):
-                self.set_state_reason('unknown inside temperature. doing nothing.')
-                return
-        
-            self.b.SetInsideTemperature(float(inside_temp))
-
-            # Evaluate 
-            self.b.Evaluate()
-        except Exception as e:
-            self.log(f"Error in tick(): {e}", level="ERROR")
-
-    def set_max_outside_temp(self, kwargs):
-        try:
-            max_val, min_val = self.max_temp_app.get_yesterday_extremes()
-            self.b.SetMaxOutsideTemperature(max_val, min_val)
-        except Exception as e:
-            self.log(f"Error in set_max_outside_temp(): {e}", level="ERROR")
-
+    # ----------------------
+    # Event callbacks
+    # ----------------------
     def window_closed(self, entity, attribute, old, new, kwargs):
-        self.log("Window closed detected, updating state...")
-        self.b.SetWindowClosed()
+        if "contact" in self.args:
+            self.log(
+                f"Window {self.args['contact']} closed. "
+                f"Kill switch for {DEFAULT_EVENT_KILL_SWITCH_DURATION} min activated."
+            )
+            self.b.SetWindowClosed()
 
     def wind_alarm_off(self, entity, attribute, old, new, kwargs):
-        self.log("Wind alarm off detected, releasing lock...")
-        self.b.ReleaseKillSwitch()
+        self.log("Wind alarm is off, releasing kill switch.")
+        self.release_kill_switch(None)
 
     def light_on(self, entity, attribute, old, new, kwargs):
-        self.log(f"Light {entity} turned on – simulating dawn behavior.")
-        self.b.ManualDayControl()
+        # Keep Previous behavior: raise dark threshold when interior light is on
+        self.log(f"Raising lux dark threshold to {self.sun_app.get_Lux_dark_with_light_inside()} (light ON).")
+        try:
+            self.b.SetLuxDark(self.sun_app.get_Lux_dark_with_light_inside())
+        except Exception:
+            pass
 
     def light_off(self, entity, attribute, old, new, kwargs):
-        self.log(f"Light {entity} turned off – simulating night behavior.")
-        self.b.ManualNightControl()
-
-class Blind:
-  """Entscheidet über die Rolladen-Situation"""
-
-  UP = 100
-  DOWN = 0
-
-  NO_CHANGE = False
-  BLIND_NEEDS_MOVING = True
-
-  KILL_SWITCH_ON = 1
-  KILL_SWITCH_OFF_NO_CHANGE = 2
-  KILL_SWITCH_OFF_CHANGE_NEEDED = 3
-
-  def __init__(self, azimuth_entry, azimuth_exit, elevation=None, azimuth=None,
-               wind_lock=False, lux_last_10_minutes=None,
-               outside_temperature=None, inside_temperature=None,
-               manual_night_control=False,
-               manual_day_control=False, ledge=None,
-               window_azimuth_position=None, window_type='window',
-               window_open=False,
-               # max inside temperatur is when the blinds go down on cold days (< 21 degree maximum)
-               max_inside_temperature_cold_day=25.0,
-               # min inside temperatur is when the blinds go down on warm days (> 21 degree maximum)
-               max_inside_temperature_warm_day=21.0,
-               lux_blind_up_threshold=Sun.LUX_BLIND_UP_THRESHOLD,
-               lux_blind_down_threshold=Sun.LUX_BLIND_DOWN_THRESHOLD,
-               lux_dark=Sun.LUX_DARK,
-               kill_switch_hold_time=8,
-               disable_tilt=False,
-               window_height=240):
-
-    # master lock prevents any further changes in blinds until released.
-    self.master_lock = False
-    self.elevation = elevation
-    self.azimuth = azimuth
-    self.azimuth_entry = azimuth_entry
-    self.azimuth_exit = azimuth_exit
-    self.lux_last_10_minutes = lux_last_10_minutes
-    self.wind_lock = wind_lock
-    self.ledge = ledge
-    self.window_open = window_open
-    # relative position of the window due to azimuth 0.
-    self.window_azimuth_position = window_azimuth_position
-
-    self.outside_temperature = outside_temperature
-    self.inside_temperature = inside_temperature
-    self.manual_night_control = manual_night_control
-    self.manual_day_control = manual_day_control
-    self.window_type = window_type
-    self.last_position = None
-    self.last_angle = None
-    self.desired_position = None
-    self.desired_angle = None
-    self.desired_position_reason = None
-    self.kill_switch_timeout = None
-
-    self.max_inside_temperature_cold_day = max_inside_temperature_cold_day
-    self.max_inside_temperature_warm_day = max_inside_temperature_warm_day
-
-    # a parameter that determines how long to hold the kill switch. Unit is hours.
-    self.kill_switch_hold_time = kill_switch_hold_time
-    self.window_height = window_height
-
-    # ---- Thresholds (base + current/adaptive) ----
-    self.base_lux_blind_up_threshold = int(lux_blind_up_threshold)
-    self.base_lux_blind_down_threshold = int(lux_blind_down_threshold)
-    # Current thresholds actually used by logic (start with base)
-    self.lux_blind_up_threshold = int(lux_blind_up_threshold)
-    self.lux_blind_down_threshold = int(lux_blind_down_threshold)
-
-    # Smoothing / hysteresis helpers
-    self.previous_elevation = self.elevation
-    self.logmsg = []
-    self.disable_tilt = disable_tilt
-    self.lux_dark = lux_dark
-
-    # Instance-bound lower/upper so they can read adaptive thresholds
-    def _lower_fn(x, lux, old_x):
-      """Return True if we should OPEN (lux low enough)."""
-      hour = datetime.datetime.now().hour
-      # Open quickly if clearly under up-threshold
-      if lux < self.lux_blind_up_threshold:
-        return True
-      # Keep closed if clearly over down-threshold
-      if lux > self.lux_blind_down_threshold:
-        return False
-      # Evening: allow reopening a bit above up_threshold to avoid staying shut
-      if hour > EVENING_HOUR_THRESHOLD:
-        return lux < int(self.lux_blind_up_threshold * 1.2)
-      # Morning/mid-day: soften based on elevation
-      if x is not None and x > 20:
-        return lux < (self.lux_blind_up_threshold + int(x * 200))
-      return lux < int(self.lux_blind_up_threshold * 1.5)
-
-    def _upper_fn(x, lux, old_x):
-      """Return True if we should CLOSE (lux high enough)."""
-      hour = datetime.datetime.now().hour
-      if lux > self.lux_blind_down_threshold:
-        return True
-      if lux < self.lux_blind_up_threshold:
-        return False
-      # After evening threshold we generally avoid new closures
-      if hour > EVENING_HOUR_THRESHOLD:
-        return False
-      # If sun is already high, be a bit more aggressive
-      if x is not None and x > 25:
-        return lux > int(self.lux_blind_down_threshold * 0.8)
-      return lux > int(self.lux_blind_down_threshold * 0.6)
-
-    self._lower_fn = _lower_fn
-    self._upper_fn = _upper_fn
-
-    self.blind_hysteresis = Hysteresis(None, None, self._lower_fn, self._upper_fn)
-    self.temperature_hysteresis = Hysteresis(max_inside_temperature_cold_day - 0.5,
-                                             max_inside_temperature_cold_day)
-
-  def __str__(self):
-    return yaml.dump(self.__dict__, default_flow_style=False)
-
-  def log(self, msg):
-    self.logmsg.append(msg)
-
-  def SetDoorType(self):
-    self.window_type='door'
-    self.log('Blind treated as door')
-
-  def SetWindowClosed(self):
-    if self.window_type == 'door':
-      self.SetKillSwitch(DEFAULT_EVENT_KILL_SWITCH_DURATION)
-
-  def FlushLog(self):
-    log = self.logmsg
-    self.logmsg = []
-    return log
-
-  def SetAzimuth(self, value):
-    self.azimuth = value
-
-  def SetElevation(self, value):
-    self.previous_elevation = self.elevation
-    self.elevation = value
-
-  def SetReedContact(self, value):
-    self.window_open = value
-
-  def SetInsideTemperature(self, value):
-    self.inside_temperature = value
-
-  # ---------------- Adaptive thresholds ----------------
-  def _apply_adaptive_thresholds(self, max_out_temp: float):
-    """
-    Ajuste dynamiquement les seuils de luminosité selon la température max extérieure.
-    
-    - Par temps froid  (≤ 15°C) → on laisse entrer plus de soleil :
-        → seuils plus élevés (fermeture plus tardive)
-    - Par temps chaud (≥ 35°C) → on protège du soleil :
-        → seuils plus bas (fermeture plus précoce)
-    """
-    try:
-        t = float(max_out_temp)
-    except Exception:
-        t = 24.0  # Valeur par défaut tempérée
-
-    # Clamp le facteur entre 0 (froid) et 1 (chaud)
-    factor = min(1.0, max(0.0, (t - 15.0) / 20.0))
-
-    # Échelles d’adaptation :
-    #  15°C → +30 % (plus de soleil)
-    #  35°C → -40 % (fermeture plus tôt)
-    COLD_SCALE = 1.3
-    HOT_SCALE = 0.6
-    scale = COLD_SCALE - (COLD_SCALE - HOT_SCALE) * factor
-
-    # Applique le facteur aux seuils de base
-    self.lux_blind_down_threshold = int(self.base_lux_blind_down_threshold * scale)
-    self.lux_blind_up_threshold   = int(self.base_lux_blind_up_threshold * scale)
-
-    self.log(
-        f"[Adaptive] MaxTemp={t:.1f}°C | scale={scale:.2f} | "
-        f"Down={self.lux_blind_down_threshold} | Up={self.lux_blind_up_threshold}"
-    )
-
-  def SetMaxOutsideTemperature(self, max_value, min_value):
-    """
-    Decides seasonal inside-temp hysteresis (existing behavior) AND
-    applies adaptive lux thresholds based on max outside temperature (new).
-    """
-    # ---- existing seasonal logic for inside temperature hysteresis ----
-    avg = (self.max_inside_temperature_cold_day + self.max_inside_temperature_warm_day)/2.0
-    if max_value > 24:
-      self.temperature_hysteresis = Hysteresis(self.max_inside_temperature_warm_day - 0.5,
-                                               self.max_inside_temperature_warm_day)
-      msg = "Minimum temperature to get down blinds is: %sC (seems like warm season)" % self.max_inside_temperature_warm_day
-    elif max_value < 16:
-      self.temperature_hysteresis = Hysteresis(self.max_inside_temperature_cold_day - 0.5,
-                                               self.max_inside_temperature_cold_day)
-      msg = "Minimum temperature to get down blinds is: %sC (seems like cold season)" % self.max_inside_temperature_cold_day
-    else:
-      if min_value < 10:
-        self.temperature_hysteresis = Hysteresis(self.max_inside_temperature_cold_day - 0.5,
-                                                 self.max_inside_temperature_cold_day)
-        msg = "Mornings are cold, we heat the building up to %sC." % self.max_inside_temperature_cold_day
-      else:
-        offset = (max_value - 16) * 0.5
-        threshold = 25 - offset
-        self.temperature_hysteresis = Hysteresis(threshold - 0.5, threshold)
-        msg = "Minimum temperature to get down blinds is: %sC (seems like transitional season)" % threshold
-
-    # ---- NEW: adapt lux thresholds according to outside max temperature ----
-    self._apply_adaptive_thresholds(max_value)
-
-    return msg
-
-  def SetWindLock(self, wind_lock):
-    self.wind_lock = wind_lock
-
-  def SetKNXPositions(self, position, angle):
-    self.knx_current_position = int(position)
-    if angle is None:
-      self.knx_current_angle = None
-    else:
-      self.knx_current_angle = int(angle)
-
-  def SetDesiredPositions(self, position, angle, reason):
-    self.desired_position = position
-    if self.disable_tilt:
-      self.desired_angle = None
-    else:
-      self.desired_angle = angle
-    self.desired_position_reason = reason
-
-  def SetLuxDark(self, threshold):
-    self.lux_dark = threshold
-
-  def SetLux(self, average_value):
-    self.lux_last_10_minutes = average_value
-
-  def SetMasterLock(self):
-    self.master_lock = True
-
-  def UnsetMasterLock(self):
-    self.master_lock = False
-
-  def GetMasterLock(self):
-    return self.master_lock
-
-  def GetDesiredPosition(self):
-    return self.desired_position
-
-  def GetDesiredAngle(self):
-    if self.disable_tilt:
-      return None
-    return self.desired_angle
-
-  def GetDesiredPositionReason(self):
-    return self.desired_position_reason
-
-  def UpdateLastPositionFromKNX(self):
-    self.last_position = self.knx_current_position
-    self.last_angle = self.knx_current_angle
-
-  def UpdateLastStateFromDesiredState(self):
-      self.last_position = self.desired_position
-      self.last_angle = self.desired_angle
-
-  def Evaluate(self):
-    kill_switch_status = self.GetKillSwitch()
-
-    if kill_switch_status == self.KILL_SWITCH_ON:
-      return self._handle_kill_switch_on()
-
-    reason = self.Control()
-    self.desired_position_reason = reason
-    self.log(f"[Evaluate] Raison: {reason}")
-
-    if kill_switch_status == self.KILL_SWITCH_OFF_CHANGE_NEEDED:
-      self._log_kill_switch_off()
-
-    if self.last_position is None:
-      self.UpdateLastPositionFromKNX()
-
-    if self.desired_position is None and self.desired_angle is None:
-      self.UpdateLastPositionFromKNX()
-      return self.NO_CHANGE
-
-    if self.desired_position is False and self.desired_angle is False:
-      return self.NO_CHANGE
-
-    if self._position_changed_by_user():
-      return self.NO_CHANGE
-
-    self.UpdateLastStateFromDesiredState()
-
-    if self._positions_match():
-      return self.NO_CHANGE
-
-    return self.BLIND_NEEDS_MOVING
-
-  def _handle_kill_switch_on(self):
-    ts = datetime.datetime.fromtimestamp(self.kill_switch_timeout).strftime('%Y-%m-%d %H:%M:%S')
-    reason = f"Kill Switch is on, release at {ts}"
-    self.desired_position_reason = reason
-    return self.NO_CHANGE
-
-  def _log_kill_switch_off(self):
-    self.log('Kill Switch was just turned off.')
-    self.log(f"Desired Position: {self.desired_position}, Last Position: {self.last_position}, KNX Position: {self.knx_current_position}")
-
-  def _position_changed_by_user(self):
-    position_diff = abs(self.last_position - self.knx_current_position) > 10
-    kill_switch_status = self.GetKillSwitch()
-
-    if self.last_angle is not None and self.knx_current_angle is not None and not self.disable_tilt:
-      angle_diff = abs(self.last_angle - self.knx_current_angle) > 10 
-    else:
-      angle_diff = False
-
-    if not self.disable_tilt:
-      if self.last_angle is None or self.knx_current_angle is None:
-        return True
-
-    if position_diff and kill_switch_status != self.KILL_SWITCH_OFF_CHANGE_NEEDED:
-      self.log(f"Turning Kill switch on due to position mismatch: last_postion: {self.last_position}, knx_current_position: {self.knx_current_position}, last_angle: {self.last_angle}, knx_current_angle: {self.knx_current_angle}")
-      self.SetKillSwitch(self.kill_switch_hold_time * 60)
-      return True
-
-    if angle_diff and kill_switch_status != self.KILL_SWITCH_OFF_CHANGE_NEEDED:
-      self.log(f"Turning Kill switch on due to angle mismatch: last_postion: {self.last_position}, knx_current_position: {self.knx_current_position}, last_angle: {self.last_angle}, knx_current_angle: {self.knx_current_angle}")
-      self.SetKillSwitch(DEFAULT_EVENT_KILL_SWITCH_DURATION)
-      return True
-
-    return False
-
-  def _positions_match(self):
-    return self.desired_position == self.knx_current_position and (
-      self.desired_angle == self.knx_current_angle or self.disable_tilt)
-
-  def SetKillSwitch(self, timeout):
-    """ Timeout for kill switch in minutes. """
-    now = int(time.time())
-    # If already active (timeout in the future), do not refresh it.
-    if getattr(self, 'kill_switch_timeout', None) and self.kill_switch_timeout > now:
-      # Maintain reason but avoid extending the timer.
-      self.desired_position_reason = "Kill Switch is ON"
-      return
-    # (Re)arm the kill switch
-    try:
-        timeout_minutes = int(timeout)
-    except Exception:
-        timeout_minutes = DEFAULT_EVENT_KILL_SWITCH_DURATION
-    self.desired_position_reason = "Kill Switch is ON"
-    self.kill_switch_timeout = now + timeout * 60
-
-  def ReleaseKillSwitch(self):
-    self.kill_switch_timeout = None
-    self.UpdateLastStateFromDesiredState()
-
-  def GetKillSwitch(self):
-    if self.kill_switch_timeout and self.kill_switch_timeout < int(time.time()):
-      self.ReleaseKillSwitch()
-      return self.KILL_SWITCH_OFF_CHANGE_NEEDED
-    if self.kill_switch_timeout:
-      return self.KILL_SWITCH_ON
-    return self.KILL_SWITCH_OFF_NO_CHANGE
-
-  def SunUnderLedge(self):
-    return (self.ledge * math.tan(math.radians(self.elevation)) / (
-        math.cos(math.radians(self.window_azimuth_position - self.azimuth))) <
-        self.window_height)
-
-  def GetBlindSunAngle(self):
-    angle = self.DOWN
-    angle = int(round((10.0/9.0 * self.elevation) / 10) * 10) 
-    return angle
-
-  def ManualDayControl(self):
-    day = False
-    if self.manual_day_control:
-      if isinstance(self.manual_day_control, str):
+        # Only reset when ALL dawn_lights are off (kept from Previous)
+        for light in self.args.get("dawn_lights", []):
+            if self.get_state(light) == "on":
+                return
+
+        self.log(f"Resetting lux dark threshold to {self.sun_app.get_lux_dark()} (all lights OFF).")
         try:
-          day = datetime.datetime.strptime(self.manual_day_control, "%H:%M").time() > datetime.datetime.now().time()
-        except ValueError:
-          self.log("The manual day control time is not in the correct format and will default to 12:00, please use the format HH:MM", level="WARNING")
-          day = datetime.datetime.now().hour < 12
-      elif isinstance(self.manual_day_control, bool):
-        day = datetime.datetime.now().hour < 12
-      else:
-        self.log("The manual day control time is not in the correct format and will default to 12:00, please use the format HH:MM", level="WARNING")
-        day = datetime.datetime.now().hour < 12
-    return day
+            self.b.SetLuxDark(self.sun_app.get_lux_dark())
+        except Exception:
+            pass
 
-  def ManualNightControl(self):
-    night = False
-    if self.manual_night_control:
-      if isinstance(self.manual_night_control, str):
+        # Evening safeguard from Previous: if after 15:00, blinds down (0%), hold them with kill switch
+        if datetime.datetime.now().hour > EVENING_HOUR_THRESHOLD:
+            pos = self.get_state(self.args["blind"], attribute="current_position")
+            if pos is not None:
+                try:
+                    if int(pos) == 0:
+                        self.b.SetKillSwitch(DEFAULT_EVENT_KILL_SWITCH_DURATION)
+                except Exception:
+                    pass
+
+    # ----------------------
+    # Helpers
+    # ----------------------
+    def is_not_a_number(self, value):
+      return value == 'unknown' or value == 'unavailable' or value is None
+
+    def evaluate_runtime(self):
+        """Read optional per-blind runtime; default to tilt delay."""
+        default_runtime = self.DEFAULT_TILT_DELAY
+        if "blind_runtime" not in self.args:
+            return default_runtime
+
         try:
-          night = datetime.datetime.strptime(self.manual_night_control, "%H:%M").time() < datetime.datetime.now().time()
-        except ValueError:
-          self.log("The manual day control time is not in the correct format and will default to 22:00, please use the format HH:MM", level="WARNING")
-          night = datetime.datetime.now().hour > 22
-      elif isinstance(self.manual_night_control, bool):
-        night = datetime.datetime.now().hour > 22
-      else:
-        self.log("The manual day control time is not in the correct format and will default to 22:00, please use the format HH:MM", level="WARNING")
-        night = datetime.datetime.now().hour > 22
-    return night
+            return float(self.get_state(self.args["blind_runtime"]))
+        except (TypeError, ValueError):
+            self.log("Invalid blind_runtime value, using default.")
+            return default_runtime
 
-  def SunHitsWindow(self):
-    if self.azimuth_entry < self.azimuth_exit:
-      return (self.azimuth > self.azimuth_entry and
-              self.azimuth < self.azimuth_exit)
-    else:
-      return (self.azimuth > self.azimuth_entry or
-              self.azimuth < self.azimuth_exit)
+    def _get_inside_temperature(self):
+        """Best-effort inside temp read with/without thermostat attribute."""
+        # If user set a flag saying the entity isn't a climate/thermostat
+        if self.args.get('inside_temperature_is_no_thermostat'):
+            t = self.get_state(self.args["inside_temperature"])
+            if t is not None:
+                return t
 
-  def DayLight(self):
-    return self.lux_last_10_minutes > Sun.LUX_DAYLIGHT
+        # Try climate attribute first (classic setup)
+        t = self.get_state(self.args.get('inside_temperature'), attribute='current_temperature')
+        if t is not None:
+            return t
 
-  def IntenseSun(self):
-    # Uses adaptive lower/upper via hysteresis callbacks bound to self
-    return self.blind_hysteresis.status_update(self.lux_last_10_minutes, self.elevation, self.previous_elevation)
+        # Fallback: plain sensor value
+        t = self.get_state(self.args.get("inside_temperature"))
+        if t is not None:
+            return t
 
-  def Darkness(self):
-    return self.lux_last_10_minutes < self.lux_dark
+        self.log("Cannot read inside temperature", level="ERROR")
+        return "unknown"
 
-  def Dawn(self):
-    return (self.lux_last_10_minutes >= Sun.LUX_DARK and
-            self.lux_last_10_minutes <= Sun.LUX_DAYLIGHT)
+    def get_valid_knx_position(self):
+        """
+        Safely retrieves the current KNX position for the blind.
+        Handles unknown or missing states gracefully without blocking AppDaemon.
+        Returns:
+            int: Current position (0–100)
+            None: If no valid position available yet
+        """
+        pos = self.get_state(self.args["blind"], attribute="current_position")
 
-  def DownBecauseOfDarkness(self):
-    if self.manual_night_control:
-      return self.DoNothing('it is dark, but this blind is controlled manually')
-    return self.Down(self.DOWN, self.DOWN, 'Down because of darkness')
+        if pos in [None, "unknown"]:
+            if not hasattr(self, "knx_first_unknown_ts"):
+                self.knx_first_unknown_ts = self.datetime()
+                self.knx_last_valid_pos = None
+                self.log("KNX position unknown (startup or bus delay). Will retry in 30s.")
+                self.run_in(self.retry_knx_sync, 30)
+                return None
 
-  def DownBecauseOfSun(self):
-    if self.ledge:
-      if self.SunUnderLedge():
-        return self.Down(self.DOWN, self.GetBlindSunAngle(),
-               'Blind goes down, Sun is reaching under the ledge')
-      else:
-        return self.DoNothing('doing nothing, ledge protects us from sun')
-    else:
-      return self.Down(self.DOWN, self.GetBlindSunAngle(),
-             'Sun hits the window, closing blind')
+            delay = (self.datetime() - self.knx_first_unknown_ts).total_seconds()
 
-  def DoNothing(self, reason):
-    return self.SetDesiredPositions(None, None, reason)
+            if delay < 300:  # tolerate 5 minutes
+                self.log(f"KNX position still unknown after {int(delay)}s, retrying later.")
+                self.run_in(self.retry_knx_sync, 30)
+                return None
 
-  def Down(self, pos=DOWN, angle=DOWN, message='Blinds are down'):
-    if self.window_open == True and self.window_type == 'door':
-      return self.DoNothing('Blinds do not change on an open door')
-    return self.SetDesiredPositions(pos, angle, message)
+            # Fallback after 5 minutes
+            self.log("KNX feedback missing >5 min, using last known position or fallback=50.")
+            return getattr(self, "knx_last_valid_pos", None) or 50
 
-  def Up(self, message):
-    if self.ManualDayControl() or self.ManualNightControl():
-      return self.DoNothing('Blinds are controlled manually')
-    else:
-      return self.SetDesiredPositions(self.UP, self.UP, message)
+        try:
+            self.knx_last_valid_pos = int(pos)
+            if hasattr(self, "knx_first_unknown_ts"):
+                del self.knx_first_unknown_ts
+            return self.knx_last_valid_pos
+        except Exception as e:
+            self.log(f"Error parsing KNX position ({pos}): {e}")
+            return getattr(self, "knx_last_valid_pos", None) or 50
 
-  def Control(self):
-    if self.wind_lock:
-      return self._handle_wind_lock()
+    def retry_knx_sync(self, kwargs):
+        pos = self.get_state(self.args["blind"], attribute="current_position")
+        if pos not in [None, "unknown"]:
+            try:
+                self.knx_last_valid_pos = int(pos)
+            except Exception:
+                self.knx_last_valid_pos = 50
+            self.log(f"KNX position restored: {pos}")
+            # run a full evaluation
+            self.evaluate()
+        else:
+            self.log("KNX still unknown after retry. Keeping current state.")
 
-    if self.Darkness():
-      return self._handle_darkness()
+    def set_state_reason(self, reason):
+        """Push the decision reason to a status helper entity (UI feedback)."""
+        try:
+            self.log(reason)
+            entity = f"input_text.{self.args['blind'].replace('cover.', '')}_status"
+            self.call_service("input_text/set_value", entity_id=entity, value=reason)
+        except Exception:
+            # don't crash on missing helper
+            pass
 
-    if self.ManualNightControl():
-      return self._handle_manual_night()
+    def release_kill_switch(self, _unused):
+        self.log("Releasing kill switch.")
+        self.b.ReleaseKillSwitch()
 
-    if self.Dawn():
-      return self._handle_dawn()
+    # ----------------------
+    # Periodic tick & evaluation
+    # ----------------------
+    def tick(self, _unused):
+        # prevent concurrency while a movement scenario is running
+        if self.b.GetMasterLock():
+            self.log(f"Masterlock active for {self.args['blind']}")
+            return
 
-    if not self.SunHitsWindow():
-      return self._handle_no_direct_sun()
+        # Global kill-switch (Previous behavior)
+        try:
+            global_kill_switch = self.get_state("switch.raffstore_kill_switch")
+            if global_kill_switch == 'on':
+                self.set_state_reason("Global Kill switch is on. All blinds are controlled manually.")
+                return
+        except Exception:
+            pass
 
-    return self._handle_direct_sun()
+        # Outside temperature via max_temp_app (New behavior)
+        outside_temp = self.max_temp_app.get_outside_temperature()
+        if self.is_not_a_number(outside_temp):
+            self.set_state_reason('Unknown outside temperature. Doing nothing.')
+            return
+        self.b.SetOutsideTemperature(float(outside_temp))
 
-  def _handle_wind_lock(self):
-    reason = 'Wind Alarm: blinds go up to prevent damage'
-    self.SetDesiredPositions(self.UP, self.UP, reason)
-    return reason
 
-  def _handle_darkness(self):
-    if self.lux_dark == Sun.LUX_DARK_WITH_LIGHT_INSIDE:
-      self.lux_dark += 200
-    reason = 'Down because of darkness'
-    self.DownBecauseOfDarkness()
-    return reason
+        # Inside temperature (merged robust read)
+        inside_temp = self._get_inside_temperature()
+        if self.is_not_a_number(inside_temp):
+            self.set_state_reason("Unknown inside temperature.")
+            return
+        self.b.SetInsideTemperature(float(inside_temp))
 
-  def _handle_manual_night(self):
-    reason = 'Manual night control active'
-    self.Down(self.DOWN, self.DOWN, reason)
-    return reason
+        # Lux + sun geometry (New behavior)
+        try:
+            self.b.SetLux(self.sun_app.get_lux_last_10_minutes())
+        except Exception:
+            # fallback to previous helper entity
+            try:
+                self.b.SetLux(float(self.get_state("input_number.sun_lux_10_minute_average")))
+            except Exception:
+                pass
 
-  def _handle_dawn(self):
-    if datetime.datetime.now().hour > EVENING_HOUR_THRESHOLD:
-      reason = 'It dawns in the evening, blinds go up'
-      self.Up(reason)
-    else:
-      reason = 'Not enough sun'
+        try:
+            self.b.SetAzimuth(float(self.get_state("sun.sun", attribute="azimuth")))
+            self.b.SetElevation(float(self.get_state("sun.sun", attribute="elevation")))
+        except Exception:
+            pass
 
-  def _handle_no_direct_sun(self):
-      """Handle case where sun does not directly hit the window."""
-      if self.DayLight():
-          extreme_heat = self._extreme_heat_test()
-          if extreme_heat:
-              reason = extreme_heat
-              return reason
+        # Contact state every tick (Previous)
+        if "contact" in self.args:
+            try:
+                self.b.SetReedContact(self.get_state(self.args["contact"]) == "on")
+            except Exception:
+                pass
 
-          reason = 'Sun has not reached the blind yet'
-          self.Up(reason)
-          return reason
+        # Wind lock every tick (support both ways)
+        wind_lock = False
+        try:
+            if "wind_alarm" in self.args:
+                wind_lock = (self.get_state(self.args["wind_alarm"]) == "on")
+            else:
+                wind_lock = (self.get_state(self.app_config["wind"]["wind_alarm"]) == "on")
+        except Exception:
+            pass
+        self.b.SetWindLock(wind_lock)
 
-      reason = 'Not enough daylight and sun does not hit window'
-      self.DoNothing(reason)
-      return reason
+        # Do the full evaluation & act (Previous behavior)
+        self.evaluate()
 
-  def _handle_direct_sun(self):
-      """Handle case where sun directly hits the window."""
-      extreme_heat = self._extreme_heat_test()
-      if extreme_heat:
-          reason = extreme_heat
-          return reason
+    def evaluate(self):
+        """Check if we need to do something with the blinds, then act."""
+        pos = self.get_valid_knx_position()
+        if pos is None:
+            self.set_state_reason("Unknown real-life KNX position. Waiting for KNX feedback.")
+            return
 
-      # If the sun is low in the morning (azimuth between 5° and 40°)
-      if not self.IntenseSun() and 5 <= self.azimuth < 40:
-          if self.temperature_hysteresis.status_update(self.inside_temperature):
-              reason = 'Low sun but hot morning, blinds go down'
-              self.DownBecauseOfSun()
-              return reason
-          else:
-              reason = 'Morning sun not strong enough'
-              self.Up(reason)
-              return reason
-      else:
-          if self.temperature_hysteresis.status_update(self.inside_temperature):
-              reason = 'Intense sun + inside temp high -> blinds go down'
-              self.DownBecauseOfSun()
-              return reason
-          else:
-              # S'il fait jour et que la luminosité est élevée mais la température est OK,
-              # on doit vérifier si les stores sont encore fermés depuis la nuit.
-              if self.knx_current_position == self.DOWN and self.DayLight() and not self.Darkness():
-                  reason = 'Morning sun, inside temp OK -> blinds go up'
-                  self.Up(reason)
-                  return reason
-              else:
-                  reason = 'Intense sun but inside temp OK -> keep current position'
-                  self.DoNothing(reason)
-                  return reason
+        # Tilt position: either same entity as blind (tilt attr) or a dedicated 'blind_tilt_position'
+        if 'blind_tilt_position' not in self.args:
+            tilt = self.get_state(self.args["blind"], attribute="current_tilt_position")
+        else:
+            tilt = self.get_state(self.args["blind_tilt_position"], attribute="current_position")
 
-  def _extreme_heat_test(self):
-      """Detect extreme heat conditions that force all blinds down."""
-      if (
-          self.inside_temperature > 26.5
-          and self.outside_temperature > 30
-          and self.lux_last_10_minutes > 3000
-      ):
-          reason = 'Extreme heat, all blinds close'
-          self.Down(self.DOWN, self.DOWN, reason)
-          return reason
-      return False
+        # Optional 10% precision mode
+        if self.args.get("use_10_percent_precision"):
+            pos = int(pos / 10) * 10
+            if tilt is not None:
+                try:
+                    tilt = int(int(tilt) / 10) * 10
+                except Exception:
+                    pass
+
+        self.knx_current_angle = tilt
+        self.b.SetKNXPositions(pos, tilt)
+        action_needed = self.b.Evaluate()
+
+        for log_line in self.b.FlushLog():
+            self.log(log_line)
+
+        self.set_state_reason(self.b.GetDesiredPositionReason())
+
+        if action_needed:
+            self.b.SetMasterLock()
+            self._move_blind(pos, tilt)
+
+    def _move_blind(self, current_pos, current_angle):
+        position = self.b.GetDesiredPosition()
+        tilt_position = self.b.GetDesiredAngle()
+
+        if position != current_pos:
+            self.log(f"Setting position to {position} for {self.args['blind']}")
+            self.call_service("cover/set_cover_position", entity_id=self.args["blind"], position=position)
+
+        if tilt_position is None:
+            self.log("Blinds do not support tilt. Skipping tilt.")
+            self.b.UnsetMasterLock()
+            return
+
+        # If we know the cover runtime and they go down, stop then set tilt earlier
+        if "blind_runtime" in self.args and position == self.b.DOWN:
+            self.run_in(
+                self.set_tilt,
+                self.evaluate_runtime(),
+                tilt_position=tilt_position,
+                position=position,
+                knx_current_angle=current_angle,
+                stop=True
+            )
+        else:
+            self.run_in(
+                self.set_tilt,
+                self.DEFAULT_TILT_DELAY,
+                tilt_position=tilt_position,
+                position=position,
+                knx_current_angle=current_angle
+            )
+
+    def set_tilt(self, kwargs):
+        # Stop before tilting if requested (faster + more precise)
+        if kwargs.get('stop'):
+            self.log("Stopping blind for tilt adjustment.")
+            self.call_service("cover/stop_cover", entity_id=self.args["blind"])
+            time.sleep(1.0)  # allow KNX/HA to update current position
+
+        tilt_position = kwargs.get('tilt_position')
+        self.log(f"Changing tilt for {self.args['blind']} from {self.knx_current_angle} to {tilt_position}")
+
+        if 'blind_tilt_position' not in self.args:
+            self.call_service(
+                "cover/set_cover_tilt_position",
+                entity_id=self.args["blind"],
+                tilt_position=tilt_position
+            )
+        else:
+            self.call_service(
+                "cover/set_cover_position",
+                entity_id=self.args["blind_tilt_position"],
+                position=tilt_position
+            )
+
+        self.b.UnsetMasterLock()
+
+    # ----------------------
+    # Max/Min outside temperature
+    # ----------------------
+    def set_max_outside_temp(self, _unused):
+        """
+        Prefer data from max_temp app (New); fallback to Previous entities.
+        """
+        try:
+            max_val, min_val = self.max_temp_app.get_yesterday_extremes()
+            msg = self.b.SetMaxOutsideTemperature(max_val, min_val)
+            self.log(msg)
+            return
+        except Exception as e:
+            self.log(f"max_temp_app.get_yesterday_extremes failed: {e}. Falling back to entities.", level="WARNING")
+
+        # Fallback to Previous behavior with entities
+        try:
+            max_temp = float(self.get_state(self.app_config["max_temp"]["max_temp_sensor_yesterday"]))
+        except Exception:
+            max_temp = 24
+            self.log(f"Defaulting max temp to {max_temp}")
+
+        try:
+            min_temp = float(self.get_state(self.args["min_temp_sensor_value_yesterday"]))
+        except Exception:
+            min_temp = 21
+            self.log(f"Defaulting min temp to {min_temp}")
+
+        msg = self.b.SetMaxOutsideTemperature(max_temp, min_temp)
+        self.log(msg)

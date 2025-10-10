@@ -23,13 +23,13 @@ class Sun:
     """Handles the smoothing and logic thresholds for sunlight detection."""
 
     # ---- Thresholds ----
-    LUX_DARK = 100                      # Below this → night
-    LUX_DARK_WITH_LIGHT_INSIDE = 250    # Night if lights are on
     LUX_BLIND_DOWN_THRESHOLD = 30000    # Sun too strong → blinds down
     LUX_BLIND_UP_THRESHOLD = 10000      # Sun weak enough → blinds up
     LUX_BLIND_UP_THRESHOLD_EVENING = 20000
     LUX_DAYLIGHT = 500                  # Daytime threshold
     MINUTES_AVERAGE = 15                # Rolling window for smoothing
+    LUX_DARK = 100                      # Below this → night
+    LUX_DARK_WITH_LIGHT_INSIDE = 250    # Night if lights are on
 
     def __init__(self):
         self.lux_values = []
@@ -85,3 +85,10 @@ class Sun:
             self.last_valid_average = lux
 
         return [lux, avg]
+
+
+    def get_lux_dark(self):
+        return self.LUX_DARK
+    
+    def get_Lux_dark_with_light_inside(self):
+        return self.LUX_DARK_WITH_LIGHT_INSIDE
