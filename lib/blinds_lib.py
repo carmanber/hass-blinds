@@ -189,7 +189,7 @@ class Blind:
     self.lux_blind_up_threshold   = int(self.base_lux_blind_up_threshold * scale)
 
     self.log(
-        f"[Adaptive] MaxTemp={t:.1f}°C | scale={scale:.2f} | "
+        f"[Adaptive] MaxTemp={t:.1f}C | scale={scale:.2f} | "
         f"Down={self.lux_blind_down_threshold} | Up={self.lux_blind_up_threshold}"
     )
 
