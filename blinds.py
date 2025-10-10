@@ -5,6 +5,7 @@ import math
 import yaml
 from lib.sun_lib import Sun
 from lib.hysteresis_lib import Hysteresis
+import appdaemon.plugins.hass.hassapi as hass
 
 EVENING_HOUR_THRESHOLD = 15
 DEFAULT_EVENT_KILL_SWITCH_DURATION = 30
@@ -14,6 +15,111 @@ DEFAULT_EVENT_KILL_SWITCH_DURATION = 30
 # On crée des versions liées à l'instance pour accéder aux seuils
 # adaptatifs (self.lux_blind_down_threshold / _up_threshold).
 # -------------------------------------------------------------------
+
+class Blinds(hass.Hass):
+    def initialize(self):
+        """Main AppDaemon entrypoint for blinds control."""
+        self.log("Initializing blinds...")
+        #. Get max_temp
+        self.check_max_temp_ready()
+
+    def check_max_temp_ready(self):
+      try:
+          max_temp = self.get_app("max_temp")
+          # ensure the app actually has the attribute
+          if hasattr(max_temp, "outside_temp"):
+              self.log("MaxTemp ready, proceeding with blinds setup.")
+              self.max_temp_app = max_temp
+              self.setup_blinds()
+          else:
+              raise AttributeError
+      except Exception:
+          self.log("MaxTemp not ready yet, retrying in 3s...")
+          self.run_in(lambda _: self.check_max_temp_ready(), 3)
+
+
+    def setup_blinds(self):
+        # Instantiate the logic class using config provided in apps.yaml
+        self.b = Blind(**self.args["blind_config"])
+
+        # Run an immediate evaluation
+        self.tick(None)
+
+        # Schedule periodic tick every 60 seconds
+        ticker = datetime.datetime.now() + datetime.timedelta(seconds=60)
+        self.run_every(self.tick, ticker, 60)
+
+        # Schedule max outside temperature reset every night at 01:01:03
+        time = datetime.time(1, 1, 3)
+        self.run_daily(self.set_max_outside_temp, time)
+
+        # Ensure default entity for yesterday’s min temp exists
+        if "min_temp_sensor_value_yesterday" not in self.args:
+            self.args[
+                "min_temp_sensor_value_yesterday"
+            ] = "input_number.yesterdays_min_outside_temp_over_24_hours"
+
+        # Initialize max outside temperature
+        self.set_max_outside_temp(None)
+
+        # Optional sensors & listeners
+        if "contact" in self.args:
+            self.listen_state(
+                self.window_closed,
+                entity_id=self.args["contact"],
+                new="off",
+                old="on",
+            )
+
+        if "wind_alarm" in self.args:
+            self.listen_state(
+                self.wind_alarm_off,
+                entity_id=self.args["wind_alarm"],
+                new="off",
+                old="on",
+            )
+
+        if "dawn_lights" in self.args:
+            for light in self.args["dawn_lights"]:
+                self.listen_state(
+                    self.light_on, entity_id=light, new="on", old="off"
+                )
+                self.listen_state(
+                    self.light_off, entity_id=light, new="off", old="on"
+                )
+
+
+    # ===== Scheduled / state callback handlers =====
+    def tick(self, kwargs):
+        """Main periodic tick every minute."""
+        try:
+            self.outside_temp = self.max_temp_app.get_outside_temperature()
+            self.b.Evaluate()
+        except Exception as e:
+            self.log(f"Error in tick(): {e}", level="ERROR")
+
+    def set_max_outside_temp(self, kwargs):
+        try:
+            max_val, min_val = self.max_temp_app.get_yesterday_extremes()
+            self.b.SetMaxOutsideTemperature(max_val, min_val)
+        except Exception as e:
+            self.log(f"Error in set_max_outside_temp(): {e}", level="ERROR")
+
+    def window_closed(self, entity, attribute, old, new, kwargs):
+        self.log("Window closed detected, updating state...")
+        self.b.SetWindowClosed()
+
+    def wind_alarm_off(self, entity, attribute, old, new, kwargs):
+        self.log("Wind alarm off detected, releasing lock...")
+        self.b.ReleaseKillSwitch()
+
+    def light_on(self, entity, attribute, old, new, kwargs):
+        self.log(f"Light {entity} turned on – simulating dawn behavior.")
+        self.b.ManualDayControl()
+
+    def light_off(self, entity, attribute, old, new, kwargs):
+        self.log(f"Light {entity} turned off – simulating night behavior.")
+        self.b.ManualNightControl()
 
 class Blind:
   """Entscheidet über die Rolladen-Situation"""
@@ -159,9 +265,6 @@ class Blind:
 
   def SetReedContact(self, value):
     self.window_open = value
-
-  def SetOutsideTemperature(self, value):
-    self.outside_temperature = value
 
   def SetInsideTemperature(self, value):
     self.inside_temperature = value
@@ -518,3 +621,65 @@ class Blind:
       self.Up(reason)
     else:
       reason = 'Not enough sun'
+
+  def _handle_no_direct_sun(self):
+      """Handle case where sun does not directly hit the window."""
+      if self.DayLight():
+          extreme_heat = self._extreme_heat_test()
+          if extreme_heat:
+              reason = extreme_heat
+              return reason
+
+          reason = 'Sun has not reached the blind yet'
+          self.Up(reason)
+          return reason
+
+      reason = 'Not enough daylight and sun does not hit window'
+      self.DoNothing(reason)
+      return reason
+
+  def _handle_direct_sun(self):
+      """Handle case where sun directly hits the window."""
+      extreme_heat = self._extreme_heat_test()
+      if extreme_heat:
+          reason = extreme_heat
+          return reason
+
+      # If the sun is low in the morning (azimuth between 5° and 40°)
+      if not self.IntenseSun() and 5 <= self.azimuth < 40:
+          if self.temperature_hysteresis.status_update(self.inside_temperature):
+              reason = 'Low sun but hot morning, blinds go down'
+              self.DownBecauseOfSun()
+              return reason
+          else:
+              reason = 'Morning sun not strong enough'
+              self.Up(reason)
+              return reason
+      else:
+          if self.temperature_hysteresis.status_update(self.inside_temperature):
+              reason = 'Intense sun + inside temp high -> blinds go down'
+              self.DownBecauseOfSun()
+              return reason
+          else:
+              # S'il fait jour et que la luminosité est élevée mais la température est OK,
+              # on doit vérifier si les stores sont encore fermés depuis la nuit.
+              if self.knx_current_position == self.DOWN and self.DayLight() and not self.Darkness():
+                  reason = 'Morning sun, inside temp OK -> blinds go up'
+                  self.Up(reason)
+                  return reason
+              else:
+                  reason = 'Intense sun but inside temp OK -> keep current position'
+                  self.DoNothing(reason)
+                  return reason
+
+  def _extreme_heat_test(self):
+      """Detect extreme heat conditions that force all blinds down."""
+      if (
+          self.inside_temperature > 26.5
+          and self.outside_temperature > 30
+          and self.lux_last_10_minutes > 3000
+      ):
+          reason = 'Extreme heat, all blinds close'
+          self.Down(self.DOWN, self.DOWN, reason)
+          return reason
+      return False

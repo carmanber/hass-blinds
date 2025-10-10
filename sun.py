@@ -60,10 +60,10 @@ class Sun(hass.Hass, SunLib):
 
         else:
             self.sensor_conf = None
-            self.log("❌ No valid sun sensors found!", level="ERROR")
+            self.log("No valid sun sensors found!", level="ERROR")
 
         if self.sensor_conf:
-            self.log(f"☀️ Sun collector configured as: {self.sensor_conf}")
+            self.log(f"***** Sun collector configured as: {self.sensor_conf}")
 
     # --- Utilitaires ---
     def safe_float(self, val):
@@ -116,11 +116,11 @@ class Sun(hass.Hass, SunLib):
                 val_night = val_day
 
         except Exception as e:
-            self.log(f"⚠️ Sensor read error: {e}", level="WARNING")
+            self.log(f"***** Sensor read error: {e}", level="WARNING")
             return
 
         if val_day is None or val_night is None:
-            self.log("⚠️ Sensor values are None — using last valid average", level="WARNING")
+            self.log("***** Sensor values are None — using last valid average", level="WARNING")
             val_day = val_night = self.last_valid_lux
 
         # Calcul du lux instantané et moyen
@@ -139,5 +139,10 @@ class Sun(hass.Hass, SunLib):
                 entity_id="input_number.sun_lux_10_minute_average",
                 value=average,
             )
-            self.log(f"☀️ Sun average lux updated → {average:.0f}")
+            self.log(f"***** Sun average lux updated : {average:.0f}")
             self.last_sent_value = average
+
+            
+    def get_lux_last_10_minutes(self):
+        # return your computed rolling average; if you already track it, just return it
+        return self.last_sent_value
