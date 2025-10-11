@@ -2,8 +2,7 @@
 import datetime
 import time
 import appdaemon.plugins.hass.hassapi as hass
-import max_temp
-import sun
+import os, yaml, glob
 
 from lib.blinds_lib import Blind, EVENING_HOUR_THRESHOLD, DEFAULT_EVENT_KILL_SWITCH_DURATION
 
@@ -14,11 +13,13 @@ class Blinds(hass.Hass):
         """Main AppDaemon entrypoint for blinds control."""
         self.log("Initializing blinds...")
 
-        # External app instances (kept from New version)
+        # ───────────────────────────────
+        # External app instances (kept from your version)
+        # ───────────────────────────────
         self.max_temp_app = self.get_app("max_temp")
         self.sun_app = self.get_app("sun")
 
-        # Wait for dependencies to report ready() (kept from New version)
+        # Wait for dependencies to report ready()
         for _trials in range(60):  # wait up to 30 seconds
             max_ready = getattr(self.max_temp_app, "ready", lambda: False)()
             sun_ready = getattr(self.sun_app, "ready", lambda: False)()
@@ -26,24 +27,90 @@ class Blinds(hass.Hass):
                 break
             self.log(f"Waiting for dependencies... max_temp={max_ready}, sun={sun_ready}", level="DEBUG")
             time.sleep(0.5)
-
         if _trials + 1 == 60:
             self.log(f"Dependency wait loop raised. Continuing initialization.", level="WARNING")
 
-        # Instantiate logic core (kept across versions)
+        # ───────────────────────────────
+        # Instantiate logic core
+        # ───────────────────────────────
         self.b = Blind(**self.args["blind_config"])
+
+        # ───────────────────────────────
+        # Adaptive periodic evaluation setup
+        # ───────────────────────────────
+        self.TICK_INTERVAL = 180  # seconds between evaluations
+        entity_id = self.args.get("entity_id", "")
+
+        # ───────────────────────────────
+        # Locate apps.yaml dynamically
+        # ───────────────────────────────
+        apps_yaml_paths = []
+
+        # 1️⃣ Add-on install (hashed folder like /addon_configs/a0d7b954_appdaemon)
+        addon_candidates = glob.glob("/addon_configs/*_appdaemon/apps.yaml")
+        apps_yaml_paths.extend(addon_candidates)
+
+        # 2️⃣ Typical Home Assistant Core or manual setup
+        apps_yaml_paths += [
+            "/config/appdaemon/apps.yaml",
+            "/config/apps.yaml",
+            "/config/apps/apps.yaml",
+        ]
+
+        # 3️⃣ Relative path (for developer/manual install)
+        try:
+            current_dir = os.path.dirname(__file__)
+            parent_dir = os.path.abspath(os.path.join(current_dir, ".."))
+            rel_path = os.path.join(parent_dir, "apps.yaml")
+            apps_yaml_paths.append(rel_path)
+        except Exception:
+            pass
+
+        # ───────────────────────────────
+        # Parse the first valid file found
+        # ───────────────────────────────
+        total_blinds = 0
+        for path in apps_yaml_paths:
+            if os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        config = yaml.safe_load(f) or {}
+                    for name, data in config.items():
+                        if isinstance(data, dict) and data.get("module") == "blinds":
+                            total_blinds += 1
+                    self.log(f"[Init] Found {total_blinds} blinds in {path}")
+                    break
+                except Exception as e:
+                    self.log(f"[WARN] Could not read {path}: {e}", level="WARNING")
+
+        # ───────────────────────────────
+        # Fallback if parsing failed
+        # ───────────────────────────────
+        if total_blinds == 0:
+            total_blinds = int(self.args.get("total_blinds", 6))
+            self.log(f"[WARN] Falling back to total_blinds={total_blinds}", level="WARNING")
+
+        self.NUM_BLINDS = total_blinds
+
+        # ───────────────────────────────
+        # Evenly distribute tick offsets
+        # ───────────────────────────────
+        idx = abs(hash(entity_id)) % total_blinds
+        offset = (idx / float(total_blinds)) * self.TICK_INTERVAL
+        next_tick = datetime.datetime.now() + datetime.timedelta(seconds=offset)
 
         # First evaluation immediately
         self.tick(None)
 
-        # Periodic evaluation every 60s
-        next_tick = datetime.datetime.now() + datetime.timedelta(seconds=60)
-        self.run_every(self.tick, next_tick, 60)
+        # Periodic evaluation every 3 min, staggered
+        self.run_every(self.tick, next_tick, self.TICK_INTERVAL)
 
-        # Nightly reset for max/min outside temp (kept across versions)
+        # ───────────────────────────────
+        # Nightly reset for max/min outside temp
+        # ───────────────────────────────
         self.run_daily(self.set_max_outside_temp, datetime.time(1, 1, 3))
 
-        # Ensure default sensor for yesterday's min temp (kept)
+        # Ensure default sensor for yesterday's min temp
         if "min_temp_sensor_value_yesterday" not in self.args:
             self.args["min_temp_sensor_value_yesterday"] = (
                 "input_number.yesterdays_min_outside_temp_over_24_hours"
@@ -52,9 +119,10 @@ class Blinds(hass.Hass):
         # Initialize max/min outside temp now
         self.set_max_outside_temp(None)
 
-        # Optional sensors & listeners (merged behavior)
+        # ───────────────────────────────
+        # Optional sensors & listeners
+        # ───────────────────────────────
         if "contact" in self.args:
-            # Keep door type setup from Previous
             try:
                 self.b.SetDoorType()
             except Exception:
@@ -66,7 +134,6 @@ class Blinds(hass.Hass):
                 old="on",
             )
 
-        # Prefer explicit wind_alarm in args; fall back to app_config if needed inside tick()
         if "wind_alarm" in self.args:
             self.listen_state(
                 self.wind_alarm_off,
@@ -79,6 +146,20 @@ class Blinds(hass.Hass):
             for light in self.args["dawn_lights"]:
                 self.listen_state(self.light_on, entity_id=light, new="on", old="off")
                 self.listen_state(self.light_off, entity_id=light, new="off", old="on")
+
+        # ───────────────────────────────
+        # Event-based re-evaluations (new)
+        # ───────────────────────────────
+        self.listen_state(self.tick, "sensor.solar_radiation", duration=90)
+        self.listen_state(self.tick, "sensor.outdoor_temperature", duration=150)
+        self.listen_state(self.tick, "sensor.indoor_temperature", duration=120)
+
+        self.log(
+            f"[Init] {self.args.get('entity_id','unknown')} ready: "
+            f"{self.NUM_BLINDS} blinds total | "
+            f"tick={self.TICK_INTERVAL}s | offset={offset:.1f}s"
+        )
+
 
     # ----------------------
     # Event callbacks
