@@ -97,7 +97,7 @@ class Blinds(hass.Hass):
 
     def light_on(self, entity, attribute, old, new, kwargs):
         # Keep Previous behavior: raise dark threshold when interior light is on
-        self.log(f"Raising lux dark threshold to {self.sun_app.get_Lux_dark_with_light_inside()} (light ON).")
+        self.log(f"Raising lux dark threshold to {self.sun_app.get_Lux_dark_with_light_inside()} (light ON).", level="DEBUG")
         try:
             self.b.SetLuxDark(self.sun_app.get_Lux_dark_with_light_inside())
         except Exception:
@@ -109,7 +109,7 @@ class Blinds(hass.Hass):
             if self.get_state(light) == "on":
                 return
 
-        self.log(f"Resetting lux dark threshold to {self.sun_app.get_lux_dark()} (all lights OFF).")
+        self.log(f"Resetting lux dark threshold to {self.sun_app.get_lux_dark()} (all lights OFF).", level="DEBUG")
         try:
             self.b.SetLuxDark(self.sun_app.get_lux_dark())
         except Exception:
@@ -178,19 +178,19 @@ class Blinds(hass.Hass):
             if not hasattr(self, "knx_first_unknown_ts"):
                 self.knx_first_unknown_ts = self.datetime()
                 self.knx_last_valid_pos = None
-                self.log("KNX position unknown (startup or bus delay). Will retry in 30s.")
+                self.log("KNX position unknown (startup or bus delay). Will retry in 30s.", level="WARNING")
                 self.run_in(self.retry_knx_sync, 30)
                 return None
 
             delay = (self.datetime() - self.knx_first_unknown_ts).total_seconds()
 
             if delay < 300:  # tolerate 5 minutes
-                self.log(f"KNX position still unknown after {int(delay)}s, retrying later.")
+                self.log(f"KNX position still unknown after {int(delay)}s, retrying later.", level="WARNING")
                 self.run_in(self.retry_knx_sync, 30)
                 return None
 
             # Fallback after 5 minutes
-            self.log("KNX feedback missing >5 min, using last known position or fallback=50.")
+            self.log("KNX feedback missing >5 min, using last known position or fallback=50.", level="WARNING")
             return getattr(self, "knx_last_valid_pos", None) or 50
 
         try:
@@ -199,7 +199,7 @@ class Blinds(hass.Hass):
                 del self.knx_first_unknown_ts
             return self.knx_last_valid_pos
         except Exception as e:
-            self.log(f"Error parsing KNX position ({pos}): {e}")
+            self.log(f"Error parsing KNX position ({pos}): {e}", level="ERROR")
             return getattr(self, "knx_last_valid_pos", None) or 50
 
     def retry_knx_sync(self, kwargs):
@@ -209,16 +209,15 @@ class Blinds(hass.Hass):
                 self.knx_last_valid_pos = int(pos)
             except Exception:
                 self.knx_last_valid_pos = 50
-            self.log(f"KNX position restored: {pos}")
+            self.log(f"KNX position restored: {pos}", level="INFO")
             # run a full evaluation
             self.evaluate()
         else:
-            self.log("KNX still unknown after retry. Keeping current state.")
+            self.log("KNX still unknown after retry. Keeping current state.", level="WARNING")
 
     def set_state_reason(self, reason):
         """Push the decision reason to a status helper entity (UI feedback)."""
         try:
-            self.log(reason)
             entity = f"input_text.{self.args['blind'].replace('cover.', '')}_status"
             self.call_service("input_text/set_value", entity_id=entity, value=reason)
         except Exception:
@@ -226,7 +225,7 @@ class Blinds(hass.Hass):
             pass
 
     def release_kill_switch(self, _unused):
-        self.log("Releasing kill switch.")
+        self.log("KillSwitch released")
         self.b.ReleaseKillSwitch()
 
     # ----------------------
@@ -326,7 +325,8 @@ class Blinds(hass.Hass):
         action_needed = self.b.Evaluate()
 
         for log_line in self.b.FlushLog():
-            self.log(log_line)
+            self.log(f"[Evaluate] {log_line}")
+
 
         self.set_state_reason(self.b.GetDesiredPositionReason())
 
@@ -411,13 +411,13 @@ class Blinds(hass.Hass):
             max_temp = float(self.get_state(self.app_config["max_temp"]["max_temp_sensor_yesterday"]))
         except Exception:
             max_temp = 24
-            self.log(f"Defaulting max temp to {max_temp}")
+            self.log(f"Defaulting max temp to {max_temp}", level="WARNING")
 
         try:
             min_temp = float(self.get_state(self.args["min_temp_sensor_value_yesterday"]))
         except Exception:
             min_temp = 21
-            self.log(f"Defaulting min temp to {min_temp}")
+            self.log(f"Defaulting min temp to {min_temp}", level="WARNING")
 
         msg = self.b.SetMaxOutsideTemperature(max_temp, min_temp)
         self.log(msg)

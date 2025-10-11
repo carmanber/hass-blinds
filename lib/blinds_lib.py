@@ -127,8 +127,24 @@ class Blind:
   def __str__(self):
     return yaml.dump(self.__dict__, default_flow_style=False)
 
-  def log(self, msg):
-    self.logmsg.append(msg)
+  def log(self, msg, level="INFO"):
+      """
+      Append a log message to the buffer if it passes the current verbosity filter.
+      - level: "DEBUG", "INFO", "WARNING", "ERROR"
+      """
+      if not hasattr(self, "logmsg"):
+          self.logmsg = []
+
+      # Current verbosity threshold: only store DEBUG if debug_logs is enabled
+      if level == "DEBUG" and not getattr(self, "debug_logs", False):
+          return  # ignore low-importance messages
+
+      # Optional: prefix level inside buffer (only for DEBUG to help identify later)
+      if level != "INFO":
+          msg = f"[{level}] {msg}"
+
+      self.logmsg.append(msg)
+
 
   def SetDoorType(self):
     self.window_type='door'
@@ -138,10 +154,71 @@ class Blind:
     if self.window_type == 'door':
       self.SetKillSwitch(DEFAULT_EVENT_KILL_SWITCH_DURATION)
 
-  def FlushLog(self):
-    log = self.logmsg
-    self.logmsg = []
-    return log
+  def FlushLog(self, force: bool = False):
+      """
+      Smart log flush: only emit new or changed messages since the last tick.
+      Set self.debug_logs = True or call FlushLog(force=True) to print everything.
+
+      Features:
+      - Suppresses duplicates across ticks.
+      - Detects cleared/removed messages.
+      - Adds "(changed after X min YY s)" on message changes.
+      - Keeps an internal history for timing context.
+      """
+
+      # --- Allow forcing all logs (debug mode) ---
+      debug_mode = getattr(self, "debug_logs", False) or force
+
+      # --- init buffers on first run ---
+      if not hasattr(self, "_prev_log_snapshot"):
+          self._prev_log_snapshot = []
+      if not hasattr(self, "_log_history"):
+          self._log_history = {}  # {msg: last_change_timestamp}
+
+      # --- capture current tick messages ---
+      unique_current = list(dict.fromkeys(self.logmsg))
+      self.logmsg = []  # clear buffer immediately
+
+      # --- if debug mode, just return them all ---
+      if debug_mode:
+          self._prev_log_snapshot = unique_current
+          now = time.time()
+          for msg in unique_current:
+              self._log_history[msg] = now
+          return unique_current
+
+      # --- main change detection ---
+      now = time.time()
+      new_lines = []
+
+      for msg in unique_current:
+          if msg not in self._prev_log_snapshot:
+              # New or changed message
+              delta_str = ""
+              if msg in self._log_history:
+                  delta_t = now - self._log_history[msg]
+                  mins, secs = divmod(int(delta_t), 60)
+                  if mins or secs:
+                      delta_str = f" (changed after {mins}m{secs:02d}s)"
+              new_lines.append(msg + delta_str)
+              self._log_history[msg] = now
+
+      # --- detect cleared lines ---
+      cleared = [m for m in self._prev_log_snapshot if m not in unique_current]
+      for msg in cleared:
+          last_seen = now - self._log_history.get(msg, now)
+          mins, secs = divmod(int(last_seen), 60)
+          new_lines.append(f"[Cleared] {msg} (after {mins}m{secs:02d}s)")
+          self._log_history.pop(msg, None)
+
+      # --- snapshot maintenance ---
+      self._prev_log_snapshot = unique_current[-200:]
+      if len(self._log_history) > 500:
+          cutoff = now - 3600
+          self._log_history = {m: t for m, t in self._log_history.items() if t > cutoff}
+
+      return new_lines
+
 
   def SetAzimuth(self, value):
     self.azimuth = value
@@ -188,10 +265,8 @@ class Blind:
     self.lux_blind_down_threshold = int(self.base_lux_blind_down_threshold * scale)
     self.lux_blind_up_threshold   = int(self.base_lux_blind_up_threshold * scale)
 
-    self.log(
-        f"[Adaptive] MaxTemp={t:.1f}C | scale={scale:.2f} | "
-        f"Down={self.lux_blind_down_threshold} | Up={self.lux_blind_up_threshold}"
-    )
+    adaptive_line = f"[Adaptive] MaxTemp={t:.1f}C | scale={scale:.2f} | Down={self.lux_blind_down_threshold} | Up={self.lux_blind_up_threshold}"
+    self.log(adaptive_line, level='DEBUG')
 
   def SetMaxOutsideTemperature(self, max_value, min_value):
     """
@@ -284,7 +359,7 @@ class Blind:
 
     reason = self.Control()
     self.desired_position_reason = reason
-    self.log(f"[Evaluate] Raison: {reason}")
+    self.log(f"Raison: {reason}")
 
     if kill_switch_status == self.KILL_SWITCH_OFF_CHANGE_NEEDED:
       self._log_kill_switch_off()
