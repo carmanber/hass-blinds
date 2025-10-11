@@ -2,7 +2,7 @@
 import datetime
 import time
 import appdaemon.plugins.hass.hassapi as hass
-import os, yaml, glob
+import os, yaml, glob, hashlib
 
 from lib.blinds_lib import Blind, EVENING_HOUR_THRESHOLD, DEFAULT_EVENT_KILL_SWITCH_DURATION
 
@@ -39,7 +39,7 @@ class Blinds(hass.Hass):
         # Adaptive periodic evaluation setup
         # ───────────────────────────────
         self.TICK_INTERVAL = 180  # seconds between evaluations
-        entity_id = self.args.get("entity_id", "")
+        app_name = getattr(self, "name", "unknown")
 
         # ───────────────────────────────
         # Locate apps.yaml dynamically
@@ -95,8 +95,12 @@ class Blinds(hass.Hass):
         # ───────────────────────────────
         # Evenly distribute tick offsets
         # ───────────────────────────────
-        idx = abs(hash(entity_id)) % total_blinds
-        offset = (idx / float(total_blinds)) * self.TICK_INTERVAL
+        # Use SHA1 and take the last bytes directly as a number between 0 and 1
+        h_bytes = hashlib.sha1(app_name.encode()).digest()
+        h_val = int.from_bytes(h_bytes[:8], "big")  # use 8 bytes = 64 bits of entropy
+        fraction = (h_val % 10**8) / 10**8          # normalized to [0, 1)
+
+        offset = fraction * self.TICK_INTERVAL
         next_tick = datetime.datetime.now() + datetime.timedelta(seconds=offset)
 
         # First evaluation immediately
@@ -147,15 +151,8 @@ class Blinds(hass.Hass):
                 self.listen_state(self.light_on, entity_id=light, new="on", old="off")
                 self.listen_state(self.light_off, entity_id=light, new="off", old="on")
 
-        # ───────────────────────────────
-        # Event-based re-evaluations (new)
-        # ───────────────────────────────
-        self.listen_state(self.tick, "sensor.solar_radiation", duration=90)
-        self.listen_state(self.tick, "sensor.outdoor_temperature", duration=150)
-        self.listen_state(self.tick, "sensor.indoor_temperature", duration=120)
-
         self.log(
-            f"[Init] {self.args.get('entity_id','unknown')} ready: "
+            f"[Init] {'app_name'} ready: "
             f"{self.NUM_BLINDS} blinds total | "
             f"tick={self.TICK_INTERVAL}s | offset={offset:.1f}s"
         )
