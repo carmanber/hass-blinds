@@ -639,13 +639,72 @@ class Blind:
                   return reason
 
   def _extreme_heat_test(self):
-      """Detect extreme heat conditions that force all blinds down."""
+      """
+      Detect extreme heat conditions that force all blinds down.
+
+      Conditions:
+        - Activates if outside temperature ≥ 30°C and lux ≥ 12 000 lx,
+          provided sun elevation is within a realistic range (5°–75°).
+        - Ignores inside temperature (proactive cooling).
+        - Deactivates only when temp < 28.5°C, lux < 8000 lx, or sun elevation < 5°.
+        - Ensures blinds stay down for at least 30 minutes once triggered.
+      """
+
+      # --- Thresholds & hysteresis ---
+      HEAT_ON  = 30.0
+      HEAT_OFF = 28.5
+      LUX_ON   = 12000
+      LUX_OFF  = 8000
+      ELEV_MIN = 5
+      ELEV_MAX = 75
+      MIN_DURATION_MIN = 30  # minimum time blinds stay down after activation
+
+      # --- Access your existing state variables ---
+      outside_temp = self.outside_temperature
+      lux_avg = self.lux_last_10_minutes
+      sun_elev = self.elevation
+
+      # Initialize persistent attributes
+      if not hasattr(self, "extreme_heat_active"):
+          self.extreme_heat_active = False
+          self.extreme_heat_timestamp = None
+
+      # --- Activation logic ---
       if (
-          self.inside_temperature > 26.5
-          and self.outside_temperature > 30
-          and self.lux_last_10_minutes > 3000
+          not self.extreme_heat_active
+          and outside_temp >= HEAT_ON
+          and lux_avg >= LUX_ON
+          and ELEV_MIN <= sun_elev <= ELEV_MAX
       ):
-          reason = 'Extreme heat, all blinds close'
+          self.extreme_heat_active = True
+          self.extreme_heat_timestamp = self.datetime()  # record start time
+          reason = f"Extreme heat ON ({outside_temp:.1f}°C, {lux_avg:.0f} lx, elev {sun_elev:.1f}°)"
+          self.log(f"[ExtremeHeat] {reason}")
           self.Down(self.DOWN, self.DOWN, reason)
           return reason
+
+      # --- Deactivation logic ---
+      elif self.extreme_heat_active:
+          # Time since activation
+          elapsed = (self.datetime() - self.extreme_heat_timestamp).total_seconds() / 60.0
+
+          # Only release after minimum duration and favorable conditions
+          if (
+              elapsed >= MIN_DURATION_MIN
+              and (
+                  outside_temp <= HEAT_OFF
+                  or lux_avg <= LUX_OFF
+                  or sun_elev < ELEV_MIN
+              )
+          ):
+              self.extreme_heat_active = False
+              reason = (
+                  f"Extreme heat OFF after {elapsed:.0f} min "
+                  f"({outside_temp:.1f}°C, {lux_avg:.0f} lx, elev {sun_elev:.1f}°)"
+              )
+              self.log(f"[ExtremeHeat] {reason}")
+              self.Up(self.UP, self.UP, reason)
+              return reason
+
+      # --- No change ---
       return False
