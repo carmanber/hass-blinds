@@ -60,11 +60,11 @@ class MaxTemp(hass.Hass):
 
         if new_temp > max_temp:
             self.call_service("input_number/set_value", entity_id=self.args["max_temp_sensor"], value=new_temp)
-            self.log(f"New daily max temperature: {new_temp:.1f}C")
+            self.log(f"New daily max temperature: {new_temp:.1f}C", level='DEBUG')
 
         if new_temp < min_temp:
             self.call_service("input_number/set_value", entity_id=self.args["min_temp_sensor"], value=new_temp)
-            self.log(f"New daily min temperature: {new_temp:.1f}C")
+            self.log(f"New daily min temperature: {new_temp:.1f}C", level='DEBUG')
 
 
     def reset(self, _unused):

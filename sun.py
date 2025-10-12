@@ -156,7 +156,7 @@ class Sun(hass.Hass, SunLib):
                 entity_id="input_number.sun_lux_10_minute_average",
                 value=average,
             )
-            self.log(f"***** Sun average lux updated : {average:.0f}")
+            self.log(f"***** Sun average lux updated : {average:.0f}", level='DEBUG')
             self.last_sent_value = average
 
             

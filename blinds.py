@@ -207,7 +207,7 @@ class Blinds(hass.Hass):
     # Helpers
     # ----------------------
     def is_not_a_number(self, value):
-      return value == 'unknown' or value == 'unavailable' or value is None
+        return value == 'unknown' or value == 'unavailable' or value is None
 
     def evaluate_runtime(self):
         """Read optional per-blind runtime; default to tilt delay."""
@@ -297,6 +297,9 @@ class Blinds(hass.Hass):
         """Push the decision reason to a status helper entity (UI feedback)."""
         try:
             entity = f"input_text.{self.args['blind'].replace('cover.', '')}_status"
+            if reason is None:
+                reason = "Unknown reason"
+                self.log("Unknown reason , logic could ot terminate", level='ERROR')
             self.call_service("input_text/set_value", entity_id=entity, value=reason)
         except Exception:
             # don't crash on missing helper

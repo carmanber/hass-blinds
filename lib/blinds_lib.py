@@ -586,6 +586,7 @@ class Blind:
       self.Up(reason)
     else:
       reason = 'Not enough sun'
+    return reason
 
   def _handle_no_direct_sun(self):
       """Handle case where sun does not directly hit the window."""
