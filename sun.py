@@ -149,15 +149,17 @@ class Sun(hass.Hass, SunLib):
         # Mémorise la dernière valeur stable
         self.last_valid_lux = average
 
-        # Évite de spammer les logs s'il n'y a pas de changement
-        if self.last_sent_value is None or abs(average - self.last_sent_value) > 200:
-            self.call_service(
-                "input_number/set_value",
-                entity_id="input_number.sun_lux_10_minute_average",
-                value=average,
-            )
-            self.log(f"***** Sun average lux updated : {average:.0f}", level='DEBUG')
-            self.last_sent_value = average
+        # --- Correctif nocturne ---
+        if self.elevation < -5:
+            average = 0.0
+
+        self.call_service(
+            "input_number/set_value",
+            entity_id="input_number.sun_lux_10_minute_average",
+            value=average,
+        )
+        self.log(f"***** Sun average lux updated : {average:.0f}", level='DEBUG')
+        self.last_sent_value = average
 
             
     def get_lux_last_10_minutes(self):
