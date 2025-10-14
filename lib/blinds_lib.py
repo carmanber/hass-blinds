@@ -471,7 +471,8 @@ class Blind:
           self.log("The manual day control time is not in the correct format and will default to 12:00, please use the format HH:MM", level="WARNING")
           day = datetime.datetime.now().hour < 12
       elif isinstance(self.manual_day_control, bool):
-        day = datetime.datetime.now().hour < 12
+        if self.manual_day_control:
+          day = datetime.datetime.now().hour < 12
       else:
         self.log("The manual day control time is not in the correct format and will default to 12:00, please use the format HH:MM", level="WARNING")
         day = datetime.datetime.now().hour < 12
@@ -487,7 +488,8 @@ class Blind:
           self.log("The manual day control time is not in the correct format and will default to 22:00, please use the format HH:MM", level="WARNING")
           night = datetime.datetime.now().hour > 22
       elif isinstance(self.manual_night_control, bool):
-        night = datetime.datetime.now().hour > 22
+        if self.manual_night_control:
+          night = datetime.datetime.now().hour > 22
       else:
         self.log("The manual day control time is not in the correct format and will default to 22:00, please use the format HH:MM", level="WARNING")
         night = datetime.datetime.now().hour > 22
@@ -517,8 +519,12 @@ class Blind:
 
   def DownBecauseOfDarkness(self):
     if self.manual_night_control:
-      return self.DoNothing('it is dark, but this blind is controlled manually')
-    return self.Down(self.DOWN, self.DOWN, 'Down because of darkness')
+      reason = 'it is dark, but this blind is controlled manually'
+      self.DoNothing(reason)
+    else:
+      reason = 'Down because of darkness'
+      self.Down(self.DOWN, self.DOWN, 'Down because of darkness')
+    return reason
 
   def DownBecauseOfSun(self):
     if self.ledge:
@@ -548,12 +554,12 @@ class Blind:
   def Control(self):
     if self.wind_lock:
       return self._handle_wind_lock()
+    
+    if self.ManualNightControl():
+      return self._handle_manual_night()
 
     if self.Darkness():
       return self._handle_darkness()
-
-    if self.ManualNightControl():
-      return self._handle_manual_night()
 
     if self.Dawn():
       return self._handle_dawn()
@@ -571,8 +577,7 @@ class Blind:
   def _handle_darkness(self):
     if self.lux_dark == Sun.LUX_DARK_WITH_LIGHT_INSIDE:
       self.lux_dark += 200
-    reason = 'Down because of darkness'
-    self.DownBecauseOfDarkness()
+    reason = self.DownBecauseOfDarkness()
     return reason
 
   def _handle_manual_night(self):

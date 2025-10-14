@@ -150,7 +150,7 @@ class Sun(hass.Hass, SunLib):
         self.last_valid_lux = average
 
         # --- Correctif nocturne ---
-        if self.elevation < -5:
+        if float(self.get_state("sun.sun", attribute="elevation")) < -5:
             average = 0.0
 
         self.call_service(
