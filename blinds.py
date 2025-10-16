@@ -13,6 +13,17 @@ class Blinds(hass.Hass):
         """Main AppDaemon entrypoint for blinds control."""
         self.log("Initializing blinds...")
 
+        # --- Internal runtime state ---
+        self.state = "IDLE"
+        self.is_moving = False
+        self.manual_override_until = None
+        self.pending_kill = False
+        self.last_cmd_ts = 0
+        self.watchdog_handle = None
+        self.error_count = 0
+        self.last_error = None
+        self.pending_intent = None   # (position, tilt)
+
         # ───────────────────────────────
         # External app instances (kept from your version)
         # ───────────────────────────────
@@ -33,7 +44,12 @@ class Blinds(hass.Hass):
         # ───────────────────────────────
         # Instantiate logic core
         # ───────────────────────────────
-        self.b = Blind(**self.args["blind_config"])
+        self.b = Blind(blinds_app=self, **self.args["blind_config"])
+        self.blind = self.args["blind"]
+        if 'blind_tilt_position' not in self.args:
+            self.blind_tilt = self.blind
+        else:
+            self.blind_tilt = self.args["blind_tilt_position"]
 
         # ───────────────────────────────
         # Adaptive periodic evaluation setup
@@ -300,7 +316,8 @@ class Blinds(hass.Hass):
             if reason is None:
                 reason = "Unknown reason"
                 self.log("Unknown reason , logic could ot terminate", level='ERROR')
-            self.call_service("input_text/set_value", entity_id=entity, value=reason)
+            self._safe_call_service("input_text", "set_value",
+                        entity_id=entity, value=reason)
         except Exception:
             # don't crash on missing helper
             pass
@@ -388,9 +405,9 @@ class Blinds(hass.Hass):
 
         # Tilt position: either same entity as blind (tilt attr) or a dedicated 'blind_tilt_position'
         if 'blind_tilt_position' not in self.args:
-            tilt = self.get_state(self.args["blind"], attribute="current_tilt_position")
+            tilt = self.get_state(self.blind, attribute="current_tilt_position")
         else:
-            tilt = self.get_state(self.args["blind_tilt_position"], attribute="current_position")
+            tilt = self.get_state(self.blind_tilt, attribute="current_position")
 
         # Optional 10% precision mode
         if self.args.get("use_10_percent_precision"):
@@ -415,61 +432,120 @@ class Blinds(hass.Hass):
             self.b.SetMasterLock()
             self._move_blind(pos, tilt)
 
-    def _move_blind(self, current_pos, current_angle):
-        position = self.b.GetDesiredPosition()
-        tilt_position = self.b.GetDesiredAngle()
+    def _set_state(self, new_state):
+        if new_state != self.state:
+            self.log(f"[STATE] {self.state} → {new_state}")
+            self.state = new_state
 
-        if position != current_pos:
-            self.log(f"Setting position to {position} for {self.args['blind']}")
-            self.call_service("cover/set_cover_position", entity_id=self.args["blind"], position=position)
-
-        if tilt_position is None:
-            self.log("Blinds do not support tilt. Skipping tilt.")
-            self.b.UnsetMasterLock()
+    def _safe_call_service(self, domain, service, **kwargs):
+        """Non-blocking call wrapper with minimal logging."""
+        now = time.time()
+        if now - self.last_cmd_ts < 5:  # 5 s rate-limit for Step 1
+            self.log("[GATE] Skipping service call (rate-limit).", level="DEBUG")
             return
 
-        # If we know the cover runtime and they go down, stop then set tilt earlier
-        if "blind_runtime" in self.args and position == self.b.DOWN:
+        self.last_cmd_ts = now
+        self.run_in(
+            lambda _: self.call_service(domain + "/" + service, **kwargs),
+            0
+        )
+
+
+    def _move_blind(self, current_pos, current_angle):
+        """
+        Smoothly move the blind to the target position and tilt in a single tick.
+
+        - Uses non-blocking _safe_call_service() to avoid AppDaemon thread blocking.
+        - Prevents overlapping commands via self.moving flag.
+        - Detects manual override on both position and tilt.
+        """
+
+        entity = self.blind
+        tilt_entity = self.blind_tilt
+
+        # Retrieve target state dynamically
+        target_pos = self.b.GetDesiredPosition()
+        target_tilt = self.b.GetDesiredAngle()
+
+        # --- Safety: prevent overlapping motion
+        if getattr(self, "moving", False):
+            self.log(f"[MOVE] Skipped: blind {entity} already moving", level="DEBUG")
+            return
+
+        # --- Detect manual override (position or tilt)
+        manual_override = False
+
+        # Position-based manual override
+        if abs(current_pos - target_pos) > 5 and abs(current_pos - getattr(self, "last_command_pos", current_pos)) > 5:
+            manual_override = True
+
+        # Tilt-based manual override
+        if (
+            current_angle is not None
+            and target_tilt is not None
+            and abs(current_angle - target_tilt) > 5
+            and abs(current_angle - getattr(self, "last_command_angle", current_angle)) > 5
+        ):
+            manual_override = True
+
+        if manual_override:
+            self.manual_override = True
+            self.log(f"[MANUAL] Detected manual override on {entity}, skipping move.", level="WARNING")
+            return
+
+        # --- Mark as moving and store command targets
+        self.moving = True
+        self.manual_override = False
+        self.last_command_pos = target_pos
+        self.last_command_angle = target_tilt
+
+        self.log(f"[MOVE] {entity}: going to {target_pos}% | tilt → {target_tilt}°", level="INFO")
+
+        # --- Execute both moves concurrently (smooth motion)
+        self.run_in(
+            lambda _: self._safe_call_service(
+                "cover", "set_cover_position",
+                entity_id=entity,
+                position=target_pos
+            ),
+            0
+        )
+
+        if tilt_entity and target_tilt is not None:
+            # Launch the tilt adjustment almost simultaneously
             self.run_in(
-                self.set_tilt,
-                self.evaluate_runtime(),
-                tilt_position=tilt_position,
-                position=position,
-                knx_current_angle=current_angle,
-                stop=True
+                lambda _: self._safe_call_service(
+                    "cover", "set_cover_tilt_position",
+                    entity_id=tilt_entity,
+                    tilt_position=target_tilt
+                ),
+                0.2  # small stagger to reduce Z-Wave congestion
             )
-        else:
-            self.run_in(
-                self.set_tilt,
-                self.DEFAULT_TILT_DELAY,
-                tilt_position=tilt_position,
-                position=position,
-                knx_current_angle=current_angle
-            )
+
+        # --- Auto-reset movement flag after travel time
+        travel_time = getattr(self, "travel_time_s", 35)  # default or FGR223-derived
+        self.run_in(lambda _: setattr(self, "moving", False), travel_time)
+
+
 
     def set_tilt(self, kwargs):
         # Stop before tilting if requested (faster + more precise)
         if kwargs.get('stop'):
             self.log("Stopping blind for tilt adjustment.")
-            self.call_service("cover/stop_cover", entity_id=self.args["blind"])
+            self._safe_call_service("cover", "stop_cover",
+                        entity_id=self.args["blind"])
+
             time.sleep(1.0)  # allow KNX/HA to update current position
 
         tilt_position = kwargs.get('tilt_position')
         self.log(f"Changing tilt for {self.args['blind']} from {self.knx_current_angle} to {tilt_position}")
 
         if 'blind_tilt_position' not in self.args:
-            self.call_service(
-                "cover/set_cover_tilt_position",
-                entity_id=self.args["blind"],
-                tilt_position=tilt_position
-            )
+            self._safe_call_service("cover", "set_cover_tilt_position",
+                        entity_id=self.blind, tilt_position=tilt_position)
         else:
-            self.call_service(
-                "cover/set_cover_position",
-                entity_id=self.args["blind_tilt_position"],
-                position=tilt_position
-            )
-
+            self._safe_call_service("cover", "set_cover_position",
+                        entity_id=self.blind_tilt, position=tilt_position)
         self.b.UnsetMasterLock()
 
     # ----------------------
@@ -502,3 +578,17 @@ class Blinds(hass.Hass):
 
         msg = self.b.SetMaxOutsideTemperature(max_temp, min_temp)
         self.log(msg)
+
+    # ----------------------
+    # Watchdog
+    # ----------------------
+    def _start_watchdog(self, timeout_s=30):
+        """Placeholder for movement watchdog (Step 3)."""
+        if self.watchdog_handle:
+            self.cancel_timer(self.watchdog_handle)
+        self.watchdog_handle = self.run_in(self._watchdog_expired, timeout_s)
+
+    def _watchdog_expired(self, kwargs):
+        self.log("[WATCHDOG] Movement timeout — resetting state.", level="WARNING")
+        self.is_moving = False
+        self._set_state("IDLE")

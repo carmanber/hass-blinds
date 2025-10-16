@@ -21,7 +21,7 @@ class Blind:
   KILL_SWITCH_OFF_NO_CHANGE = 2
   KILL_SWITCH_OFF_CHANGE_NEEDED = 3
 
-  def __init__(self, azimuth_entry, azimuth_exit, elevation=None, azimuth=None,
+  def __init__(self, blinds_app, azimuth_entry, azimuth_exit, elevation=None, azimuth=None,
                wind_lock=False, lux_last_10_minutes=None,
                outside_temperature=None, inside_temperature=None,
                manual_night_control=False,
@@ -40,6 +40,7 @@ class Blind:
                window_height=240):
 
     # master lock prevents any further changes in blinds until released.
+    self.blinds_app = blinds_app
     self.master_lock = False
     self.elevation = elevation
     self.azimuth = azimuth
@@ -83,6 +84,7 @@ class Blind:
     self.logmsg = []
     self.disable_tilt = disable_tilt
     self.lux_dark = lux_dark
+    self.log = self.blinds_app.log
 
     # Instance-bound lower/upper so they can read adaptive thresholds
     def _lower_fn(x, lux, old_x):
@@ -126,25 +128,6 @@ class Blind:
 
   def __str__(self):
     return yaml.dump(self.__dict__, default_flow_style=False)
-
-  def log(self, msg, level="INFO"):
-      """
-      Append a log message to the buffer if it passes the current verbosity filter.
-      - level: "DEBUG", "INFO", "WARNING", "ERROR"
-      """
-      if not hasattr(self, "logmsg"):
-          self.logmsg = []
-
-      # Current verbosity threshold: only store DEBUG if debug_logs is enabled
-      if level == "DEBUG" and not getattr(self, "debug_logs", False):
-          return  # ignore low-importance messages
-
-      # Optional: prefix level inside buffer (only for DEBUG to help identify later)
-      if level != "INFO":
-          msg = f"[{level}] {msg}"
-
-      self.logmsg.append(msg)
-
 
   def SetDoorType(self):
     self.window_type='door'
@@ -554,12 +537,12 @@ class Blind:
   def Control(self):
     if self.wind_lock:
       return self._handle_wind_lock()
-    
-    if self.ManualNightControl():
-      return self._handle_manual_night()
 
     if self.Darkness():
       return self._handle_darkness()
+    
+    if self.ManualNightControl():
+      return self._handle_manual_night()
 
     if self.Dawn():
       return self._handle_dawn()
