@@ -35,7 +35,7 @@ class Blind:
                lux_blind_up_threshold=Sun.LUX_BLIND_UP_THRESHOLD,
                lux_blind_down_threshold=Sun.LUX_BLIND_DOWN_THRESHOLD,
                lux_dark=Sun.LUX_DARK,
-               kill_switch_hold_time=8,
+               kill_switch_hold_time=4,
                disable_tilt=False,
                window_height=240):
 
@@ -218,6 +218,9 @@ class Blind:
 
   def SetInsideTemperature(self, value):
     self.inside_temperature = value
+
+  def GetKillSwitchHoldTime(self):
+    return self.kill_switch_hold_time
 
   # ---------------- Adaptive thresholds ----------------
   def _apply_adaptive_thresholds(self, max_out_temp: float):
@@ -407,20 +410,67 @@ class Blind:
       self.desired_angle == self.knx_current_angle or self.disable_tilt)
 
   def SetKillSwitch(self, timeout):
-    """ Timeout for kill switch in minutes. """
-    now = int(time.time())
-    # If already active (timeout in the future), do not refresh it.
-    if getattr(self, 'kill_switch_timeout', None) and self.kill_switch_timeout > now:
-      # Maintain reason but avoid extending the timer.
+      """
+      Safely (re)arm the Kill Switch timer.
+
+      This prevents the blind from being moved by automation for a defined duration
+      (timeout in minutes). If the blind is currently moving, the Kill Switch
+      activation will be delayed until movement finishes.
+
+      Args:
+          timeout (int or float): Duration in minutes for the kill switch.
+      """
+
+      now = int(time.time())
+
+      # --- 1️⃣ Guard: prevent kill switch while moving ---
+      if getattr(self, "moving", False):
+          self.blinds_app.log(
+              f"[KILL] Skipped activation — blind still moving, retrying in 5s (timeout={timeout} min)",
+              level="WARNING",
+          )
+          # Schedule retry after short delay
+          self.blinds_app.run_in(lambda _: self.SetKillSwitch(timeout), 5)
+          return
+
+      # --- 2️⃣ If already active, don't extend timer ---
+      if getattr(self, "kill_switch_timeout", None) and self.kill_switch_timeout > now:
+          remaining = int((self.kill_switch_timeout - now) / 60)
+          self.desired_position_reason = "Kill Switch is ON"
+          self.blinds_app.log(
+              f"[KILL] Already active, {remaining} min remaining (no extension).",
+              level="DEBUG",
+          )
+          return
+
+      # --- 3️⃣ Parse and validate timeout value ---
+      try:
+          timeout_minutes = float(timeout)
+      except Exception:
+          timeout_minutes = getattr(self, "DEFAULT_EVENT_KILL_SWITCH_DURATION", 10)  # fallback
+          self.blinds_app.log(
+              f"[KILL] Invalid timeout provided, fallback to {timeout_minutes} min",
+              level="WARNING",
+          )
+
+      # --- 4️⃣ Arm new Kill Switch timer ---
+      self.kill_switch_timeout = now + int(timeout_minutes * 60)
       self.desired_position_reason = "Kill Switch is ON"
-      return
-    # (Re)arm the kill switch
-    try:
-        timeout_minutes = int(timeout)
-    except Exception:
-        timeout_minutes = DEFAULT_EVENT_KILL_SWITCH_DURATION
-    self.desired_position_reason = "Kill Switch is ON"
-    self.kill_switch_timeout = now + timeout * 60
+      self.blinds_app.log(
+          f"[KILL] Activated for {timeout_minutes:.1f} min "
+          f"(until {datetime.datetime.fromtimestamp(self.kill_switch_timeout).strftime('%H:%M:%S')})",
+          level="INFO",
+      )
+
+      # --- 5️⃣ Schedule automatic reset ---
+      def _auto_reset(_):
+          # Only clear if the timer actually expired (avoid race with re-arm)
+          if time.time() >= self.kill_switch_timeout:
+              self.kill_switch_timeout = None
+              self.blinds_app.log("[KILL] Timer expired — automation re-enabled.", level="INFO")
+
+      self.blinds_app.run_in(_auto_reset, timeout_minutes * 60)
+
 
   def ReleaseKillSwitch(self):
     self.kill_switch_timeout = None

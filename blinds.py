@@ -308,19 +308,87 @@ class Blinds(hass.Hass):
             self.evaluate()
         else:
             self.log("KNX still unknown after retry. Keeping current state.", level="WARNING")
-
+    
     def set_state_reason(self, reason):
-        """Push the decision reason to a status helper entity (UI feedback)."""
+        self.log(reason)
+        obj = "input_text.%s_status" % self.args["blind"].replace("cover.", "")
+        self.call_service("input_text/set_value", entity_id=obj, value=reason) 
+
+
+
+    def _safe_call_service(self, domain: str, service: str, **kwargs):
+        """
+        Hybrid async/sync safe service call with fine-grained rate limiting and fallback.
+
+        - Default: async (non-blocking) via AppDaemon's scheduler
+        - Fallback: synchronous retry if async fails or not confirmed
+        - Per-entity cooldown: avoids flooding Z-Wave and Home Assistant
+        """
+
+        COOLDOWN = 5              # seconds between identical calls
+
+        if domain == "cover":
+            MAX_ASYNC_DELAY = 5
+        else:
+            MAX_ASYNC_DELAY = 1.0
+     
+        # --- Build unique key for this call ---
+        key_parts = [domain, service]
+        if "entity_id" in kwargs:
+            key_parts.append(str(kwargs["entity_id"]))
+        for k, v in sorted(kwargs.items()):
+            if k != "entity_id":
+                key_parts.append(f"{k}:{v}")
+        call_key = "|".join(key_parts)
+
+        # --- Rate limiting ---
+        now = time.time()
+        if not hasattr(self, "_last_service_calls"):
+            self._last_service_calls = {}
+        last_call = self._last_service_calls.get(call_key, 0)
+        if now - last_call < COOLDOWN:
+            self.log(f"[GATE] Skipping duplicate within {COOLDOWN}s: {call_key}", level="WARNING")
+            return
+        self._last_service_calls[call_key] = now
+
+        # --- Build service string ---
+        domain_service = f"{domain}/{service}"
+
+        # --- Track async result ---
+        setattr(self, f"_last_async_ok_{call_key}", None)
+
+        # --- Define async call wrapper ---
+        def async_wrapper(_):
+            try:
+                self.call_service(domain_service, **kwargs)
+                setattr(self, f"_last_async_ok_{call_key}", True)
+                self.log(f"[SAFE-ASYNC] Executed {domain_service} {kwargs}", level="DEBUG")
+            except Exception as e:
+                setattr(self, f"_last_async_ok_{call_key}", False)
+                self.log(f"[SAFE-ASYNC] Failed {domain_service}: {e}", level="WARNING")
+
+        # --- Schedule non-blocking async call ---
+        self.run_in(lambda _: async_wrapper(_), 0)
+
+        # --- Wait briefly to check result ---
+        self.sleep(0.1)  # allow scheduler to run
+        start = time.time()
+        while time.time() - start < MAX_ASYNC_DELAY:
+            result = getattr(self, f"_last_async_ok_{call_key}", None)
+            if result is True:
+                return  # async worked fine
+            elif result is False:
+                break
+            self.sleep(0.05)
+
+        # --- Fallback to synchronous call ---
+        self.log(f"[SAFE-FALLBACK] Retrying {domain_service} synchronously after async delay.", level="WARNING")
         try:
-            entity = f"input_text.{self.args['blind'].replace('cover.', '')}_status"
-            if reason is None:
-                reason = "Unknown reason"
-                self.log("Unknown reason , logic could ot terminate", level='ERROR')
-            self._safe_call_service("input_text", "set_value",
-                        entity_id=entity, value=reason)
-        except Exception:
-            # don't crash on missing helper
-            pass
+            self.call_service(domain_service, **kwargs)
+            self.log(f"[SAFE-SYNC] Executed {domain_service} successfully after fallback.", level="INFO")
+        except Exception as e:
+            self.log(f"[SAFE-SYNC] FAILED {domain_service}: {e}", level="ERROR")
+
 
     def release_kill_switch(self, _unused):
         self.log("KillSwitch released")
@@ -432,121 +500,82 @@ class Blinds(hass.Hass):
             self.b.SetMasterLock()
             self._move_blind(pos, tilt)
 
+    # ----------------------
+    # Move blind
+    # ----------------------
+
     def _set_state(self, new_state):
         if new_state != self.state:
             self.log(f"[STATE] {self.state} → {new_state}")
             self.state = new_state
 
-    def _safe_call_service(self, domain, service, **kwargs):
-        """Non-blocking call wrapper with minimal logging."""
-        now = time.time()
-        if now - self.last_cmd_ts < 5:  # 5 s rate-limit for Step 1
-            self.log("[GATE] Skipping service call (rate-limit).", level="DEBUG")
-            return
-
-        self.last_cmd_ts = now
-        self.run_in(
-            lambda _: self.call_service(domain + "/" + service, **kwargs),
-            0
-        )
-
-
     def _move_blind(self, current_pos, current_angle):
-        """
-        Smoothly move the blind to the target position and tilt in a single tick.
-
-        - Uses non-blocking _safe_call_service() to avoid AppDaemon thread blocking.
-        - Prevents overlapping commands via self.moving flag.
-        - Detects manual override on both position and tilt.
-        """
-
+        """Safely move blind and tilt to target positions, respecting manual override cooldown."""
         entity = self.blind
         tilt_entity = self.blind_tilt
-
-        # Retrieve target state dynamically
         target_pos = self.b.GetDesiredPosition()
-        target_tilt = self.b.GetDesiredAngle()
+        target_angle = self.b.GetDesiredAngle()
 
-        # --- Safety: prevent overlapping motion
-        if getattr(self, "moving", False):
-            self.log(f"[MOVE] Skipped: blind {entity} already moving", level="DEBUG")
-            return
-
-        # --- Detect manual override (position or tilt)
-        manual_override = False
-
-        # Position-based manual override
-        if abs(current_pos - target_pos) > 5 and abs(current_pos - getattr(self, "last_command_pos", current_pos)) > 5:
-            manual_override = True
-
-        # Tilt-based manual override
-        if (
-            current_angle is not None
-            and target_tilt is not None
-            and abs(current_angle - target_tilt) > 5
-            and abs(current_angle - getattr(self, "last_command_angle", current_angle)) > 5
-        ):
-            manual_override = True
-
-        if manual_override:
-            self.manual_override = True
-            self.log(f"[MANUAL] Detected manual override on {entity}, skipping move.", level="WARNING")
-            return
-
-        # --- Mark as moving and store command targets
-        self.moving = True
-        self.manual_override = False
-        self.last_command_pos = target_pos
-        self.last_command_angle = target_tilt
-
-        self.log(f"[MOVE] {entity}: going to {target_pos}% | tilt → {target_tilt}°", level="INFO")
-
-        # --- Execute both moves concurrently (smooth motion)
-        self.run_in(
-            lambda _: self._safe_call_service(
-                "cover", "set_cover_position",
-                entity_id=entity,
-                position=target_pos
-            ),
-            0
-        )
-
-        if tilt_entity and target_tilt is not None:
-            # Launch the tilt adjustment almost simultaneously
-            self.run_in(
-                lambda _: self._safe_call_service(
-                    "cover", "set_cover_tilt_position",
-                    entity_id=tilt_entity,
-                    tilt_position=target_tilt
-                ),
-                0.2  # small stagger to reduce Z-Wave congestion
+        # --- 1️⃣ Skip automation during manual override grace period ---
+        if self.manual_override_active():
+            self.log(
+                f"[MANUAL] Skipping automation (cooldown active, {self.kill_switch_hold_time}h remaining)",
+                level="DEBUG",
             )
+            return
 
-        # --- Auto-reset movement flag after travel time
-        travel_time = getattr(self, "travel_time_s", 35)  # default or FGR223-derived
-        self.run_in(lambda _: setattr(self, "moving", False), travel_time)
+        # --- 2️⃣ Detect manual movement (position or tilt changed unexpectedly) ---
+        if (
+            abs(current_pos - getattr(self, "last_command_pos", current_pos)) > 5
+            or abs(current_angle - getattr(self, "last_command_angle", current_angle)) > 5
+        ):
+            self.last_manual_override = datetime.datetime.now()
+            self.log(
+                f"[MANUAL] User override detected (pos={current_pos}, tilt={current_angle}). "
+                f"Automation paused for {self.kill_switch_hold_time}h.",
+                level="WARNING",
+            )
+            return
 
+        # --- 3️⃣ If already moving, skip ---
+        if getattr(self, "moving", False):
+            self.log("[MOVE] Skipped: blind still moving", level="DEBUG")
+            return
 
+        # --- 4️⃣ Compute movement ---
+        if abs(current_pos - target_pos) > 5 or abs(current_angle - target_angle) > 5:
+            self.moving = True
+            self.last_command_pos = target_pos
+            self.last_command_angle = target_angle
 
-    def set_tilt(self, kwargs):
-        # Stop before tilting if requested (faster + more precise)
-        if kwargs.get('stop'):
-            self.log("Stopping blind for tilt adjustment.")
-            self._safe_call_service("cover", "stop_cover",
-                        entity_id=self.args["blind"])
+            self.log(
+                f"[MOVE] Moving to {target_pos}% | tilt -> {target_angle}",
+                level="INFO",
+            )
+            self.log(f"DEBUG : About to move blind {entity} to {target_pos} (tilt={target_angle})", level='INFO')
 
-            time.sleep(1.0)  # allow KNX/HA to update current position
+            # Run movement asynchronously (no blocking)
+            self._safe_call_service("cover", "set_cover_position", entity_id=entity, position=target_pos)
+            if tilt_entity:
+                self._safe_call_service(
+                    "cover", "set_cover_tilt_position", entity_id=tilt_entity, tilt_position=target_angle
+                )
 
-        tilt_position = kwargs.get('tilt_position')
-        self.log(f"Changing tilt for {self.args['blind']} from {self.knx_current_angle} to {tilt_position}")
+            # Reset moving flag after travel time
+            travel_time = getattr(self, "travel_time_s", 90)
+            self.run_in(lambda _: setattr(self, "moving", False), travel_time)
+            self.b.UnsetMasterLock()
 
-        if 'blind_tilt_position' not in self.args:
-            self._safe_call_service("cover", "set_cover_tilt_position",
-                        entity_id=self.blind, tilt_position=tilt_position)
-        else:
-            self._safe_call_service("cover", "set_cover_position",
-                        entity_id=self.blind_tilt, position=tilt_position)
-        self.b.UnsetMasterLock()
+    def manual_override_active(self):
+        """Return True if a manual override cooldown is still active."""
+        if not hasattr(self, "last_manual_override"):
+            return False
+
+        delta = datetime.datetime.now() - self.last_manual_override
+        hold_time_sec = self.b.GetKillSwitchHoldTime * 3600  # convert hours to seconds
+
+        return delta.total_seconds() < hold_time_sec
+
 
     # ----------------------
     # Max/Min outside temperature
