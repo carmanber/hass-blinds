@@ -405,7 +405,7 @@ class Blinds(hass.Hass):
 
         # Global kill-switch (Previous behavior)
         try:
-            global_kill_switch = self.get_state("switch.raffstore_kill_switch")
+            global_kill_switch = self.get_state("input_boolean.raffstore_kill_switch")
             if global_kill_switch == 'on':
                 self.set_state_reason("Global Kill switch is on. All blinds are controlled manually.")
                 return
@@ -515,6 +515,10 @@ class Blinds(hass.Hass):
         tilt_entity = self.blind_tilt
         target_pos = self.b.GetDesiredPosition()
         target_angle = self.b.GetDesiredAngle()
+        immediate_tilt = (
+            self.args.get("tilt_mode") == "immediate"
+            and "blind_tilt_position" not in self.args
+        )
 
         # --- 1️⃣ Skip automation during manual override grace period ---
         if self.manual_override_active():
@@ -555,16 +559,53 @@ class Blinds(hass.Hass):
             self.log(f"DEBUG : About to move blind {entity} to {target_pos} (tilt={target_angle})", level='INFO')
 
             # Run movement asynchronously (no blocking)
-            self._safe_call_service("cover", "set_cover_position", entity_id=entity, position=target_pos)
-            if tilt_entity:
-                self._safe_call_service(
-                    "cover", "set_cover_tilt_position", entity_id=tilt_entity, tilt_position=target_angle
+            if abs(current_pos - target_pos) > 5:
+                self._safe_call_service("cover", "set_cover_position", entity_id=entity, position=target_pos)
+
+            if target_angle is None:
+                self.log("Blinds do not support tilt. Skipping tilt.")
+                self.b.UnsetMasterLock()
+            elif immediate_tilt:
+                self._set_tilt_position(tilt_entity, target_angle)
+                self.b.UnsetMasterLock()
+            else:
+                delay = self.DEFAULT_TILT_DELAY
+                stop = False
+                if "blind_runtime" in self.args and target_pos == self.b.DOWN:
+                    delay = self.evaluate_runtime()
+                    stop = True
+                self.run_in(
+                    self.set_tilt,
+                    delay,
+                    tilt_position=target_angle,
+                    knx_current_angle=current_angle,
+                    stop=stop
                 )
 
             # Reset moving flag after travel time
             travel_time = getattr(self, "travel_time_s", 90)
             self.run_in(lambda _: setattr(self, "moving", False), travel_time)
-            self.b.UnsetMasterLock()
+
+    def _set_tilt_position(self, tilt_entity, tilt_position):
+        if 'blind_tilt_position' not in self.args:
+            self._safe_call_service(
+                "cover", "set_cover_tilt_position", entity_id=tilt_entity, tilt_position=tilt_position
+            )
+        else:
+            self._safe_call_service(
+                "cover", "set_cover_position", entity_id=tilt_entity, position=tilt_position
+            )
+
+    def set_tilt(self, kwargs):
+        if kwargs.get('stop'):
+            self.log("Stopping blind for tilt adjustment.")
+            self._safe_call_service("cover", "stop_cover", entity_id=self.blind)
+            time.sleep(1.0)
+
+        tilt_position = kwargs.get('tilt_position')
+        self.log(f"Changing tilt for {self.blind} from {self.knx_current_angle} to {tilt_position}")
+        self._set_tilt_position(self.blind_tilt, tilt_position)
+        self.b.UnsetMasterLock()
 
     def manual_override_active(self):
         """Return True if a manual override cooldown is still active."""

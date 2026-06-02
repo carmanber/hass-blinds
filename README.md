@@ -183,6 +183,7 @@ blind_wohnzimmer_west:
   - hysteresis_lib_global
   - sun_lib_global
   blind: cover.raffstore_erdgeschoss_wohnzimmer_west
+  tilt_mode: immediate
   inside_temperature: climate.thermostat_erdgeschoss_wohnzimmer
   contact: binary_sensor.kontakt_erdgeschoss_wohnzimmer_hebe_schiebetuer
   blind_config:
@@ -208,6 +209,7 @@ You need to configure these parameters for every window.
 | `global_dependencies` | appdaemon specific configuration that hints library dependencies. Required. |
 | `blind` | homeassistant name of the blind. Needs to support angle setting and positioning of the blind. Required. |
 | `blind_tilt_position` | homeassistant name of the blind that controls the tilt but reports the tilt as a position. This is the case for some z-wave controller (ex. Fibaro roller shutter). Optional parameter, only use if your blind has this setup ([here](https://community.home-assistant.io/t/fibaro-roller-shutter-3-fgr-223-cannot-get-it-to-work-properly/97577/158) for a detailed conversation). |
+| `tilt_mode` | Optional parameter for covers that support tilt on the same Home Assistant entity. Set to `immediate` to send position and tilt commands without the default delay. Omit it to keep the delayed behavior. Configure this next to `blind`, not inside `blind_config`. |
 | `inside_temperature` | the thermostat that gives you the inside temperature (it grabs automatically the state or the current_temperature` attribute of the captor). Use a room close by if you don't have thermostats in every room. Required parameter. |
 | `contact` | homeassistant binary sensor that knows if the window is open or not. If used, the blinds will not go down if the window is open. Once you close the door the blind control will sleep for 30 minutes and then position itself. This waiting time is useful if you want to go out, close your door in the summer to avoid heat coming in, and therefore avoid locking yourself out. | 
 | `blind_config` | A hash that configures the Blind class in the constructor of lib/blinds_lib.py. This allows you to override defaults. Required. |
@@ -237,7 +239,7 @@ input_text:
 #### Kill Switch
 
 There are times (for example when it snows and freezes overnight) where you want to disable your blind automation and want to go full manual.
-Therefore, you need to implement a kill switch in homeassistant. That entity is expected to be called `switch.raffstore_kill_switch` in homeasisstant.
+Therefore, you need to implement a kill switch in homeassistant. That entity is expected to be called `input_boolean.raffstore_kill_switch` in homeasisstant.
 
 ## Contribute
 

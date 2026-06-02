@@ -360,7 +360,7 @@ class Blind:
     if self.desired_position is False and self.desired_angle is False:
       return self.NO_CHANGE
 
-    if self._position_changed_by_user():
+    if self._position_changed_by_user(kill_switch_status):
       return self.NO_CHANGE
 
     self.UpdateLastStateFromDesiredState()
@@ -380,25 +380,27 @@ class Blind:
     self.log('Kill Switch was just turned off.')
     self.log(f"Desired Position: {self.desired_position}, Last Position: {self.last_position}, KNX Position: {self.knx_current_position}")
 
-  def _position_changed_by_user(self):
+  def _position_changed_by_user(self, kill_switch_status):
     position_diff = abs(self.last_position - self.knx_current_position) > 10
-    kill_switch_status = self.GetKillSwitch()
+    position_target_changed = self.desired_position != self.last_position
 
     if self.last_angle is not None and self.knx_current_angle is not None and not self.disable_tilt:
       angle_diff = abs(self.last_angle - self.knx_current_angle) > 10 
+      angle_target_changed = self.desired_angle != self.last_angle
     else:
       angle_diff = False
+      angle_target_changed = False
 
     if not self.disable_tilt:
       if self.last_angle is None or self.knx_current_angle is None:
         return True
 
-    if position_diff and kill_switch_status != self.KILL_SWITCH_OFF_CHANGE_NEEDED:
+    if position_diff and not position_target_changed and kill_switch_status != self.KILL_SWITCH_OFF_CHANGE_NEEDED:
       self.log(f"Turning Kill switch on due to position mismatch: last_postion: {self.last_position}, knx_current_position: {self.knx_current_position}, last_angle: {self.last_angle}, knx_current_angle: {self.knx_current_angle}")
       self.SetKillSwitch(self.kill_switch_hold_time * 60)
       return True
 
-    if angle_diff and kill_switch_status != self.KILL_SWITCH_OFF_CHANGE_NEEDED:
+    if angle_diff and not angle_target_changed and kill_switch_status != self.KILL_SWITCH_OFF_CHANGE_NEEDED:
       self.log(f"Turning Kill switch on due to angle mismatch: last_postion: {self.last_position}, knx_current_position: {self.knx_current_position}, last_angle: {self.last_angle}, knx_current_angle: {self.knx_current_angle}")
       self.SetKillSwitch(DEFAULT_EVENT_KILL_SWITCH_DURATION)
       return True
@@ -715,7 +717,7 @@ class Blind:
           and ELEV_MIN <= sun_elev <= ELEV_MAX
       ):
           self.extreme_heat_active = True
-          self.extreme_heat_timestamp = self.datetime()  # record start time
+          self.extreme_heat_timestamp = datetime.datetime.now()  # record start time
           reason = f"Extreme heat ON ({outside_temp:.1f}°C, {lux_avg:.0f} lx, elev {sun_elev:.1f}°)"
           self.log(f"[ExtremeHeat] {reason}")
           self.Down(self.DOWN, self.DOWN, reason)
@@ -724,7 +726,7 @@ class Blind:
       # --- Deactivation logic ---
       elif self.extreme_heat_active:
           # Time since activation
-          elapsed = (self.datetime() - self.extreme_heat_timestamp).total_seconds() / 60.0
+          elapsed = (datetime.datetime.now() - self.extreme_heat_timestamp).total_seconds() / 60.0
 
           # Only release after minimum duration and favorable conditions
           if (
